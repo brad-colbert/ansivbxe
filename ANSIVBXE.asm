@@ -18,6 +18,8 @@
 ;	   ###	 ######	 ###  #	 #     #  ###	 #    #	 #    #	 ######
 ;
 ;	Written by: Joseph Zatarski
+;	Updates by: Brad Colbert
+;	Version: v0.02
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################

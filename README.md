@@ -23,6 +23,8 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 - **VBXE (Video Board XE)** with FX core
 - Atari 850 interface (or compatible) for R: device serial I/O
 - DOS with `CIOV` support (e.g., SpartaDOS X, MyDOS)
+- **[MADS assembler](http://mads.atari8.info/)** for building the executable
+- `dir2atr` for building the bootable ATR disk image
 
 ## Files
 
@@ -38,14 +40,49 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 | `VBXE.equ` | VBXE hardware equates |
 | `atarihardware.equ` | General Atari hardware equates |
 | `atarios.equ` | Atari OS equates |
+| `Makefile` | Build rules for assembling the XEX and creating the ATR disk image |
 | `changelog.txt` | Version history, features, and known bugs |
 | `license.txt` | License terms |
 
 ## Building
 
-The source is written for the **[MADS assembler](http://mads.atari8.info/)**.
+The source is written for the **[MADS assembler](http://mads.atari8.info/)** and can be built with the included `Makefile`.
 
+Build the executable:
+
+```sh
+make
 ```
+
+or:
+
+```sh
+make all
+```
+
+This assembles `ANSIVBXE.asm` into `ANSIVBXE.XEX`.
+
+Build the bootable ATR disk image:
+
+```sh
+make disk
+```
+
+This copies `ANSIVBXE.XEX` into the `disk/` directory and runs:
+
+```sh
+dir2atr -b Dos25 720 ANSIVBXE.ATR disk/
+```
+
+To remove generated build artifacts:
+
+```sh
+make clean
+```
+
+If you want to assemble manually without `make`, you can still run:
+
+```sh
 mads ANSIVBXE.asm
 ```
 
