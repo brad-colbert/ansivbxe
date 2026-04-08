@@ -7,6 +7,17 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.02] - 2026-04-07
+
+### Changed
+- Relaxed VBXE FX core detection so the terminal accepts FX-compatible firmware revisions instead of requiring a strict 1.2x minor revision match.
+- Clarified XDL address initialization by assigning the low, middle, and high bytes explicitly during VBXE setup.
+
+### Fixed
+- Corrected palette initialization so `csel` advances while loading both foreground and background color entries into the VBXE palette.
+
+---
+
 ## [0.01] - 2015-04-07
 
 ### Added
