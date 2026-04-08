@@ -1,0 +1,39 @@
+v0.01.2015.04.07
+new features:
+- added version number into main source file as data coded for human readablity
+in compiled form.
+
+bugfixes:
+- VBXE memory window no longer conflicts with extended memory. It hase been
+moved to $A000-AFFF. This overlaps the cartridge area, but cartridges have
+priority over the VBXE memory area, so it works as long as you run with X.
+
+known bugs:
+- none yet ;)
+
+todo:
+- add more ANSI control sequence support
+
+
+v0.00.2015.04.06 - from now on, I'm tracking changes as I go. I'm also zipping
+new versions up for archival purposes. Version numbers shall be of the format
+x.zz.yyyy.mm.dd where x will be incremented for major new features added, zz
+will be incremented for bugfixes and feature improvements/minor features.
+yyyy.mm.dd is the date it was finished, formatted for sorting.
+
+features in this version:
+- ASCII/ANSI C0 control function set support
+- ANSI C1 control function support
+- ANSI SGR control sequence support and basic control sequence handling
+mechanism
+
+known bugs:
+- init routine leaves VBXE memory window open which just so happens to overlap
+part of the banking window for banked RAM. This doesn't work with SDX on
+machines which have extended ram as a result.
+
+todo:
+- add more ANSI control sequence support
+- add in a version number field in the source code so the binary files can be
+identified
+

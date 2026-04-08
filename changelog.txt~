@@ -1,0 +1,14 @@
+v0.00.2015.04.06 - from now on, I'm tracking changes as I go. I'm also zipping new versions up for archival purposes. Version numbers shall be of the format x.zz.yyyy.mm.dd
+X will be incremented for new features added. zz will be incremented for bugfixes. yyyy.mm.dd is the date it was finished, formatted for sorting.
+features in this version:
+- ASCII/ANSI C0 control function set support
+- ANSI C1 control function support
+- ANSI SGR control sequence support and basic control sequence handling mechanism
+
+known bugs:
+- init routine leaves VBXE memory window open which just so happens to overlap part of the banking window for banked RAM. This doesn't work with SDX on machines which have extended ram as a result.
+
+todo:
+- add more ANSI control sequence support
+- add in a version number field in the source code so the binary files can be identified
+

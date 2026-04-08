@@ -1,0 +1,15 @@
+Anyone is allowed to do anything with this software as long as the following
+conditions are met:
+
+1. You may not offer this software for sale for profit unless the buyer is made
+aware that the software is also available for no charge and the buyer agrees to
+pay the negotiated price regardless of that fact. This stands regardless of
+modifications which have been made to the software.
+
+2. Derivative works and distributions:
+A derivative work is one which has been based off of this software and then distributed, the following must be
+followed:
+	i. modifications cannot remove license notices, such as this one
+	ii. modifications must be credited to the author(s)
+	iii. any credited authors of the software which was modified must
+	continue to be credited in derivative works.
