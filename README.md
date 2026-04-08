@@ -109,6 +109,13 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 
 ## Changelog
 
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.02 — 2026-04-07
+- Relaxed VBXE FX core detection to accept FX-compatible firmware revisions instead of requiring a strict 1.2x minor revision match
+- Clarified XDL address initialization by assigning the low, middle, and high bytes explicitly during VBXE setup
+- Corrected palette initialization so `csel` advances while loading both foreground and background palette entries
+
 ### v0.01 — 2015-04-07
 - VBXE memory window moved to `$A000–$AFFF` to avoid conflict with extended RAM (SDX fix)
 - Version number embedded in compiled binary as human-readable data
