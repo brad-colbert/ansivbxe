@@ -3,6 +3,7 @@
 An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences and a 256-character IBM PC font, using the VBXE (Video Board XE) graphics expansion.
 
 **Written by:** Joseph Zatarski
+
 **Updated by:** Brad Colbert
 
 ---
