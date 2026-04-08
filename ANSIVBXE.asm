@@ -103,22 +103,12 @@ start		lda	core_version
 		sta	ICBA + 1
 		jmp	print_error
 
-; check minor revision number.
-core_fx		lda	minor_revision		; jump here if FX core detected
-		and 	#$70			; masks the ram upgrade bit and the bugfix bits out (1.2xa/r)
-		cmp	#$20			; make sure it is 2x since this is written for it
-		beq	good_core
+; FX core detected - newer firmware versions may have different core_version values,
+; so we're being more permissive now. Just ensure it's an FX-like core.
+core_fx		; for FX core compatible versions (1.2x, 1.26, 1.40, etc)
+		; we'll accept the FX core and proceed without strict version checking
 
-; print an error message in case of incompatible VBXE core
-; just set the ICBA and call another routine since printing to E: is used twice.
-		lda	#<wrong_core
-		sta	ICBA
-		lda	#>wrong_core
-		sta	ICBA+1
-		jmp	print_error
-; core was good, so set 
-; shut off ANTIC DMA except instruction fetch
-good_core	lda	#$20			; jump here if minor revision was good too
+		lda	#$20			; shut off ANTIC DMA except instruction fetch
 		sta	SDMCTL
 
 ; begin actually setting up the VBXE
@@ -127,10 +117,12 @@ good_core	lda	#$20			; jump here if minor revision was good too
 
 ; vbxe_mem_base is the high address of what we want to use for our VBXE memory window
 ; the first 4 bits of memac_control are the high nibble of the base address of the window
-; we OR vbxe_mem_base with $8 because that enables CPU access, disables ANTIC access,
-; and makes window size 4K
+; bits 0-1: window size (00=4K, 01=8K, 10=16K, 11=32K)
+; bit 2: MAE - ANTIC access enable
+; bit 3: MCE - CPU access enable
+; Keep a 4K window at A000-AFFF to avoid mapping into cartridge/ROM space.
 
-		lda	#>vbxe_mem_base|$8
+		lda	#[>vbxe_mem_base]|$8	; $08 = 1000b: 4K window (bits 0-1 = 00) + CPU access (bit 3 = 1)
 		sta	memac_control
 
 ; we are going to put a blitter list which clears the VBXE RAM into the first page of memory
@@ -203,9 +195,6 @@ print_error	; prints the error message already set in ICBA
 
 no_vbxe_msg	; message to display for missing VBXE or non-fx core
 		.byte	'No VBXE or non-fx core. Press return to continue.', $9B
-		
-wrong_core	; message for incompatible core version
-		.byte	'Incompatible VBXE core (requires 1.2x). Press return to continue.', $9B
 
 clear_ram_bcb					; blitter routine to clear the whole VBXE RAM. 
 						; we can only work with a 512 byte wide and 256 line high portion, or 128K, so we do that four times.
@@ -385,6 +374,7 @@ fore_inner_loop	lda	vbxe_mem_base + $0800,x	; load the color values. use index x
 		sta	cg
 		lda	vbxe_mem_base + $0802,x
 		sta	cb
+		inc	csel			; move to next color entry
 		inx				; increment 3 times because each color is 3 bytes
 		inx
 		inx
@@ -410,6 +400,7 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 		sta	cg
 		lda	vbxe_mem_base + $0802,y
 		sta	cb
+		inc	csel			; move to next color entry
 		inx				; increment the inner loop
 		cpx	#$10			; stop after the color has been loaded 16 times
 		bne	back_inner_loop
@@ -438,13 +429,14 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 		
 		jsr	mem_move
 		
-; load the xdl address
+; load the xdl address ($0800 in internal VBXE memory)
 
 		lda	#$00
-		sta	xdl_adr
-		sta	xdl_adr + 2
+		sta	xdl_adr			; low byte = $00
 		lda	#$08
-		sta	xdl_adr + 1
+		sta	xdl_adr_mid		; middle byte = $08
+		lda	#$00
+		sta	xdl_adr_high		; high byte = $00
 
 ; enable xdl and disable transparent colors
 

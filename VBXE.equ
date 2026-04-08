@@ -12,8 +12,12 @@
 ;	VBXE Equates
 ;###################################################################################################################
 ; VBXE equates
-core_version	equ	$D640			; tells us whether FX or GTIA-emu core
-minor_revision	equ	$D641			; tells us minor revision number (like 26 in 1.26)
+core_version	equ	$D640			; tells us whether FX or GTIA-emu core (READ-only)
+
+; XDL address registers (3 consecutive bytes for 24-bit address)
+xdl_adr		equ	$D641			; XDL address low byte
+xdl_adr_mid	equ	$D642			; XDL address middle byte  
+xdl_adr_high	equ	$D643			; XDL address high byte
 
 ; memory window B control register
 ; bit 0 - 4 - bank number (banks are all 16K)
@@ -35,9 +39,8 @@ csel		equ	$D645			; selects current color number for write
 cr		equ	$D646			; red component value
 cg		equ	$D647			; green component value
 cb		equ	$D648			; blue component value
-xdl_adr		equ	$D641			; xdl address registers (3 consecutive)
 
-; video control register
+; video control register (WRITE to $D640)
 ; bit 0 - xdl_enabled - set to enable XDL
 ; bit 1 - xcolor - set to enable 16 luminances and separate ANTIC hi-res foreground and background hues
 ; bit 2 - no_trans - clear means color 0 is transparent
