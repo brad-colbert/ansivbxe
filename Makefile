@@ -1,9 +1,10 @@
-ASM      = mads
-SRC      = ANSIVBXE.asm
-XEX      = ANSIVBXE.XEX
-ATR      = ANSIVBXE.ATR
-DISK_DIR = disk
-DEPS     = atarios.equ atarihardware.equ VBXE.equ
+ASM       = mads
+PROJ_NAME = ANSIVBXE
+SRC       = $(PROJ_NAME).asm
+XEX       = $(PROJ_NAME).XEX
+ATR       = $(PROJ_NAME).ATR
+DISK_DIR  = disk
+DEPS      = atarios.equ atarihardware.equ VBXE.equ
 
 .PHONY: all disk clean
 
@@ -15,8 +16,8 @@ $(XEX): $(SRC) $(DEPS)
 disk: $(ATR)
 
 $(ATR): $(XEX)
-	cp $(XEX) $(DISK_DIR)/$(XEX)
-	dir2atr -b Dos25 720 $(ATR) $(DISK_DIR)/
+	cp $(XEX) $(DISK_DIR)/$(PROJ_NAME).AR1
+	dir2atr -b MyDos4534 720 $(ATR) $(DISK_DIR)/
 
 clean:
 	rm -f $(XEX) $(ATR)
