@@ -20,7 +20,7 @@ START_ADDR  ?= 0x2800
 
 .PHONY: all disk ca65 ca65-disk mads mads-disk clean
 
-all: ca65
+all: mads ca65
 
 ca65: $(CA65_XEX)
 
@@ -36,7 +36,7 @@ $(CA65_ATR): $(CA65_XEX)
 	cp $(CA65_XEX) $(DISK_DIR)/$(PROJ_NAME).AR1
 	dir2atr -b MyDos4534 720 $(CA65_ATR) $(DISK_DIR)/
 
-disk: ca65-disk
+disk: ca65-disk mads-disk
 
 mads: $(MADS_XEX)
 
