@@ -17,14 +17,14 @@
 ;	    #	  #   #	  #  #	 #     #   #	 #    #	 #    #	  #   #
 ;	   ###	 ######	 ###  #	 #     #  ###	 #    #	 #    #	 ######
 ;
-;	Written by: Joseph Zatarski
-;	Updates by: Brad Colbert
-;	Version: v0.02
+;	Converted by:     Brad Colbert
+;	Original MADS by: Joseph Zatarski
+;	Version: v0.04
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
 ;
-; TODO:	add recieve buffer so that I don't call CIOV to do one character at a time. (done)
+; TODO:	(from Joey Z) add recieve buffer so that I don't call CIOV to do one character at a time. (done)
 ;	label scroll contains some unnecesary math (refer to comments near it) (done)
 ;	add stuff beyond just the C0 (ASCII) and C1 control character/sequence sets (this means finally starting on the cool stuff)
 ;		SGR - set grahpics rendition (color, high intensity, etc.) - done unless I want to improve support for 'default colors'
@@ -1050,6 +1050,256 @@ ignore		rts
 .endproc					; end is_last_parm
 
 .endproc					; end SGR_adr
+
+;###################################################################################################################
+; parse_param: parse a decimal parameter from ctrl_seq_buf starting at index X
+; returns the value in A. X is left pointing at the first non-digit byte.
+; if no digits are found, A = 0 (caller applies default).
+
+.proc parse_param
+		lda	#0
+		sta	parameter_val
+next_digit	lda	ctrl_seq_buf, x
+		cmp	#$30			; '0'
+		bcc	done			; < '0', not a digit
+		cmp	#$3A			; one past '9'
+		bcs	done			; >= ':', not a digit
+		and	#$0F			; get digit value 0-9
+		pha				; save digit
+		lda	parameter_val
+		asl				; *2
+		asl				; *4
+		clc
+		adc	parameter_val		; *5
+		asl				; *10
+		sta	parameter_val
+		pla				; get digit back
+		clc
+		adc	parameter_val
+		sta	parameter_val
+		inx
+		jmp	next_digit
+done		lda	parameter_val
+		rts
+.endproc
+
+;###################################################################################################################
+; recalc_cursor: recalculate cursor_address from row and column
+; cursor_address = vbxe_screen_top + row * 160 + column * 2
+
+.proc recalc_cursor
+		lda	#<vbxe_screen_top
+		sta	cursor_address
+		lda	#>vbxe_screen_top
+		sta	cursor_address + 1
+		ldx	row
+		beq	add_col
+add_row		lda	cursor_address
+		clc
+		adc	#160
+		sta	cursor_address
+		bcc	no_carry
+		inc	cursor_address + 1
+no_carry	dex
+		bne	add_row
+add_col		lda	column
+		asl				; column * 2
+		clc
+		adc	cursor_address
+		sta	cursor_address
+		bcc	done
+		inc	cursor_address + 1
+done		rts
+.endproc
+
+;###################################################################################################################
+; CUF - Cursor Forward (ESC[nC) - move cursor right by n columns (default 1)
+
+.proc CUF_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param
+		tay
+		bne	has_param
+		ldy	#1			; default is 1
+has_param
+move_loop	lda	column
+		cmp	#79
+		bcs	done			; at right edge, stop
+		inc	column
+		lda	cursor_address
+		clc
+		adc	#2
+		sta	cursor_address
+		bcc	no_carry
+		inc	cursor_address + 1
+no_carry	dey
+		bne	move_loop
+done		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; CUB - Cursor Back (ESC[nD) - move cursor left by n columns (default 1)
+
+.proc CUB_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param
+		tay
+		bne	has_param
+		ldy	#1
+has_param
+move_loop	lda	column
+		beq	done			; at left edge, stop
+		dec	column
+		lda	cursor_address
+		sec
+		sbc	#2
+		sta	cursor_address
+		bcs	no_borrow
+		dec	cursor_address + 1
+no_borrow	dey
+		bne	move_loop
+done		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; CUU - Cursor Up (ESC[nA) - move cursor up by n rows (default 1)
+
+.proc CUU_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param
+		tay
+		bne	has_param
+		ldy	#1
+has_param
+move_loop	lda	row
+		beq	done			; at top, stop
+		dec	row
+		lda	cursor_address
+		sec
+		sbc	#160
+		sta	cursor_address
+		bcs	no_borrow
+		dec	cursor_address + 1
+no_borrow	dey
+		bne	move_loop
+done		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; CUD - Cursor Down (ESC[nB) - move cursor down by n rows (default 1)
+
+.proc CUD_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param
+		tay
+		bne	has_param
+		ldy	#1
+has_param
+move_loop	lda	row
+		cmp	#23
+		bcs	done			; at bottom, stop
+		inc	row
+		lda	cursor_address
+		clc
+		adc	#160
+		sta	cursor_address
+		bcc	no_carry
+		inc	cursor_address + 1
+no_carry	dey
+		bne	move_loop
+done		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; CUP - Cursor Position (ESC[row;colH) - move cursor to absolute position (default 1;1)
+; ANSI parameters are 1-based; internal row/column are 0-based.
+
+.proc CUP_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param		; parse row
+		beq	default_row
+		sec
+		sbc	#1			; convert 1-based to 0-based
+		jmp	check_row
+default_row	lda	#0
+check_row	cmp	#24
+		bcc	row_ok
+		lda	#23
+row_ok		sta	row
+		lda	ctrl_seq_buf, x
+		cmp	#$3B			; ';' separator?
+		bne	default_col
+		inx				; skip ';'
+		jsr	parse_param		; parse col
+		beq	default_col
+		sec
+		sbc	#1			; convert 1-based to 0-based
+		jmp	check_col
+default_col	lda	#0
+check_col	cmp	#80
+		bcc	col_ok
+		lda	#79
+col_ok		sta	column
+		jsr	recalc_cursor
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; ED - Erase in Display (ESC[nJ)
+; n=0: clear from cursor to end of screen (default)
+; n=1: clear from beginning of screen to cursor
+; n=2: clear entire screen
+
+.proc ED_adr
+		ldx	#0
+		jsr	parse_param
+		cmp	#2
+		beq	clear_all
+		rts				; only n=2 supported for now
+clear_all	jsr	cursor_off
+		lda	#0
+		sta	row
+		sta	column
+		lda	#<vbxe_screen_top
+		sta	cursor_address
+		lda	#>vbxe_screen_top
+		sta	cursor_address + 1
+		jsr	scroll_page
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; EL - Erase in Line (ESC[nK)
+; n=0: clear from cursor to end of line (default)
+; currently only n=0 is supported
+
+.proc EL_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param		; get n (default 0)
+		cmp	#0
+		bne	done			; only n=0 supported for now
+		lda	#79
+		sec
+		sbc	column			; A = number of chars to clear
+		tax
+		beq	done			; nothing to clear if at end of line
+		ldy	#0
+clear_loop	lda	#0			; null character
+		sta	(cursor_address), y
+		iny
+		lda	text_color		; current background color
+		sta	(cursor_address), y
+		iny
+		dex
+		bne	clear_loop
+done		jmp	cursor_on
+.endproc
 		
 .proc mem_move					; memory move routine.
 ; copies number of bytes in counter + 1 from address in src_ptr to address in dst_ptr
@@ -1440,7 +1690,21 @@ C1_handler_table
 ; control sequences come first. I don't know which I'll choose for the final design yet, but I'll choose at some point.
 
 ctrl_seq_table
-		.byte	'm', 0 
+		.byte	'C', 0
+		.word	CUF_adr			; cursor forward (right)
+		.byte	'A', 0
+		.word	CUU_adr			; cursor up
+		.byte	'B', 0
+		.word	CUD_adr			; cursor down
+		.byte	'D', 0
+		.word	CUB_adr			; cursor back (left)
+		.byte	'H', 0
+		.word	CUP_adr			; cursor position
+		.byte	'J', 0
+		.word	ED_adr			; erase in display
+		.byte	'K', 0
+		.word	EL_adr			; erase in line
+		.byte	'm', 0
 		.word	SGR_adr			; set graphics rendition
 		.byte	0			; this shows the end of the list.
 		
@@ -1718,6 +1982,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.01.2015.04.07"
+version		.byte	"v0.03.2026.04.14"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

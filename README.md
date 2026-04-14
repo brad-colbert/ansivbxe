@@ -1,21 +1,35 @@
 # ANSI VBXE Terminal Emulator
 
-An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences and a 256-character IBM PC font, using the VBXE (Video Board XE) graphics expansion.
+An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences and a 256-character IBM PC font, using the VBXE (Video Board XE) graphics expansion. Renders ANSI art and interacts with BBS systems over serial.
 
-**Written by:** Joseph Zatarski
-
-**Updated by:** Brad Colbert
+**Converted to CA65 and updated by:** Brad Colbert
+**Original MADS by:** Joseph Zatarski
 
 ---
 
 ## Features
 
-- Full **ANSI/ECMA-48 C0 and C1 control function** set support
-- **ANSI SGR** (Set Graphics Rendition) — colors, bold, inverse, etc.
-- 256-character IBM CGA-style font via VBXE text mode
+- 80×24 text display via VBXE overlay text mode
+- 256-character IBM CGA-style font
 - Editable ANSI color palette (16 colors: 8 standard + 8 high-intensity)
 - Serial communication via Atari R: device (850 interface or compatible)
 - Concurrent I/O for non-blocking receive
+- Keyboard input with auto-repeat via custom IRQ handler
+
+### Supported ANSI/ECMA-48 Sequences
+
+| Sequence | Code | Description |
+|----------|------|-------------|
+| C0 control set | `$00`–`$1F` | NUL, BEL, BS, LF, VT, FF, CR, ESC, etc. |
+| C1 control set | ESC + `$40`–`$5F` | IND, NEL, CSI, and others |
+| SGR | `ESC[…m` | Set Graphics Rendition — foreground/background color, bold, inverse, default |
+| CUF | `ESC[nC` | Cursor Forward (right) by _n_ columns (default 1) |
+| CUB | `ESC[nD` | Cursor Back (left) by _n_ columns (default 1) |
+| CUU | `ESC[nA` | Cursor Up by _n_ rows (default 1) |
+| CUD | `ESC[nB` | Cursor Down by _n_ rows (default 1) |
+| CUP | `ESC[r;cH` | Cursor Position — move to row _r_, column _c_ (1-based, default 1;1) |
+| ED | `ESC[2J` | Erase in Display — clear entire screen (mode 2) |
+| EL | `ESC[K` | Erase in Line — clear from cursor to end of line (mode 0) |
 
 ## Requirements
 
@@ -23,77 +37,75 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 - **VBXE (Video Board XE)** with FX core
 - Atari 850 interface (or compatible) for R: device serial I/O
 - DOS with `CIOV` support (e.g., SpartaDOS X, MyDOS)
-- **[MADS assembler](http://mads.atari8.info/)** for building the executable
-- `dir2atr` for building the bootable ATR disk image
+
+### Build tools
+
+- **[ca65/ld65](https://cc65.github.io/doc/ca65.html)** (cc65 suite) — primary assembler/linker for the CA65 source
+- **[MADS assembler](http://mads.atari8.info/)** — for building the original MADS source
+- **dir2atr** — for creating bootable ATR disk images
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `ANSIVBXE.asm` | Main source code (MADS assembler, ORG'd at `$2800`) |
-| `ANSIVBXE.XEX` | Compiled binary |
-| `ANSIVBXE.ATR` | ATR disk image with DOS and the terminal (set as D1:) |
+| `ANSIVBXE_ca65.asm` | Main source code (ca65 assembler) |
+| `ANSIVBXE.asm` | Original MADS assembler source |
+| `atarios_ca65.inc` | Atari OS equates (ca65) |
+| `atarihardware_ca65.inc` | General Atari hardware equates (ca65) |
+| `VBXE_ca65.inc` | VBXE hardware equates (ca65) |
+| `atarios.equ` | Atari OS equates (MADS) |
+| `atarihardware.equ` | General Atari hardware equates (MADS) |
+| `VBXE.equ` | VBXE hardware equates (MADS) |
 | `IBMPC.FNT` | 256-character IBM PC CGA font for the terminal |
 | `first.fnt` | First 128 characters of `IBMPC.FNT` |
 | `second.fnt` | Second 128 characters of `IBMPC.FNT` |
 | `ANSI.PAL` | ANSI color palette — 16 colors as 3-byte RGB entries |
-| `VBXE.equ` | VBXE hardware equates |
-| `atarihardware.equ` | General Atari hardware equates |
-| `atarios.equ` | Atari OS equates |
-| `Makefile` | Build rules for assembling the XEX and creating the ATR disk image |
-| `changelog.txt` | Version history, features, and known bugs |
+| `Makefile` | Build rules for both ca65 and MADS targets |
+| `CHANGELOG.md` | Version history, features, and known bugs |
 | `license.txt` | License terms |
 
 ## Building
 
-The source is written for the **[MADS assembler](http://mads.atari8.info/)** and can be built with the included `Makefile`.
+The `Makefile` supports both the **ca65** (cc65 suite) and **MADS** assemblers.
 
-Build the executable:
-
-```sh
-make
-```
-
-or:
+Build both targets:
 
 ```sh
 make all
 ```
 
-This assembles `ANSIVBXE.asm` into `ANSIVBXE.XEX`.
+Build only the ca65 version:
 
-Build the bootable ATR disk image:
+```sh
+make ca65
+```
+
+Build only the MADS version:
+
+```sh
+make mads
+```
+
+Build bootable ATR disk images:
 
 ```sh
 make disk
 ```
 
-This copies `ANSIVBXE.XEX` into the `disk/` directory and runs:
-
-```sh
-dir2atr -b Dos25 720 ANSIVBXE.ATR disk/
-```
-
-To remove generated build artifacts:
+Clean build artifacts:
 
 ```sh
 make clean
 ```
 
-If you want to assemble manually without `make`, you can still run:
-
-```sh
-mads ANSIVBXE.asm
-```
-
-The code is ORG'd at `$2800`. It is not relocatable, but the base address can be changed by modifying the `ORG` statements in the source.
+The code is ORG'd at `$2800`. It is not relocatable, but the base address can be changed by modifying the `ORG`/`.org` statement in the source (or setting `START_ADDR` for the ca65 build).
 
 ## Usage
 
-1. Set `ANSIVBXE.ATR` as `D1:` in your emulator or write it to a real disk.
+1. Set `ANSIVBXE_ca65.ATR` (or `ANSIVBXE.ATR`) as `D1:` in your emulator or write it to a real disk.
 2. Boot the disk. The terminal will start automatically.
-3. The `TEST.ANS` file on the disk can be modified to display different ANSI art/text.
-4. Connect via the R: device (default: 9600 baud, 8 data bits).
+3. Connect via the R: device (default: 9600 baud, 8 data bits, no parity).
+4. The `TEST.ANS` file on the disk can be used to test ANSI art rendering.
 
 ## Font
 
