@@ -22,14 +22,22 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 |----------|------|-------------|
 | C0 control set | `$00`–`$1F` | NUL, BEL, BS, LF, VT, FF, CR, ESC, etc. |
 | C1 control set | ESC + `$40`–`$5F` | IND, NEL, CSI, and others |
-| SGR | `ESC[…m` | Set Graphics Rendition — foreground/background color, bold, inverse, default |
+| SGR | `ESC[…m` | Set Graphics Rendition — foreground/background color, bold, blink (as bold), inverse, default, normal intensity, inverse off |
 | CUF | `ESC[nC` | Cursor Forward (right) by _n_ columns (default 1) |
 | CUB | `ESC[nD` | Cursor Back (left) by _n_ columns (default 1) |
 | CUU | `ESC[nA` | Cursor Up by _n_ rows (default 1) |
 | CUD | `ESC[nB` | Cursor Down by _n_ rows (default 1) |
 | CUP | `ESC[r;cH` | Cursor Position — move to row _r_, column _c_ (1-based, default 1;1) |
-| ED | `ESC[2J` | Erase in Display — clear entire screen (mode 2) |
-| EL | `ESC[K` | Erase in Line — clear from cursor to end of line (mode 0) |
+| HVP | `ESC[r;cf` | Horizontal and Vertical Position — alias for CUP |
+| CNL | `ESC[nE` | Cursor Next Line — move to beginning of line _n_ lines down (default 1) |
+| CPL | `ESC[nF` | Cursor Previous Line — move to beginning of line _n_ lines up (default 1) |
+| CHA | `ESC[nG` | Cursor Horizontal Absolute — move to column _n_ (1-based, default 1) |
+| ED | `ESC[nJ` | Erase in Display — mode 0 (cursor to end), mode 1 (start to cursor), mode 2 (entire screen) |
+| EL | `ESC[nK` | Erase in Line — mode 0 (cursor to EOL), mode 1 (start to cursor), mode 2 (entire line) |
+| SCP | `ESC[s` | Save Cursor Position |
+| RCP | `ESC[u` | Restore Cursor Position |
+| SU | `ESC[nS` | Scroll Up by _n_ lines (default 1) |
+| SD | `ESC[nT` | Scroll Down (stub — recognized but not yet implemented) |
 
 ## Requirements
 

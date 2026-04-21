@@ -27,11 +27,22 @@
 ; TODO:	(from Joey Z) add recieve buffer so that I don't call CIOV to do one character at a time. (done)
 ;	label scroll contains some unnecesary math (refer to comments near it) (done)
 ;	add stuff beyond just the C0 (ASCII) and C1 control character/sequence sets (this means finally starting on the cool stuff)
-;		SGR - set grahpics rendition (color, high intensity, etc.) - done unless I want to improve support for 'default colors'
-;		add J code - ED - erase in page
-;		add A code
-;		add C code
-;		add D code
+;		SGR - set graphics rendition (color, high intensity, etc.) - done
+;		add J code - ED - erase in display (modes 0, 1, 2) - done
+;		add A code - CUU - cursor up - done
+;		add B code - CUD - cursor down - done
+;		add C code - CUF - cursor forward (right) - done
+;		add D code - CUB - cursor back (left) - done
+;		add H code - CUP - cursor position (absolute) - done
+;		add K code - EL - erase in line (modes 0, 1, 2) - done
+;		add s code - SCP - save cursor position - done
+;		add u code - RCP - restore cursor position - done
+;		add f code - HVP - horizontal/vertical position (alias for CUP) - done
+;		add E code - CNL - cursor next line - done
+;		add F code - CPL - cursor previous line - done
+;		add G code - CHA - cursor horizontal absolute - done
+;		add S code - SU - scroll up - done
+;		add T code - SD - scroll down - done
 ;
 
 	.setcpu "6502"
@@ -93,6 +104,10 @@ ctrl_seq_index	= $92				; points to the current position in the control sequence
 final_byte	= $93				; holds the control sequence final byte
 inter_byte	= $94				; holds the control sequence intermediate byte
 parameter_val	= $95				; holds a single parameter value
+saved_row	= $96				; saved cursor row for SCP/RCP
+saved_column	= $97				; saved cursor column for SCP/RCP
+saved_cur_lo	= $98				; saved cursor_address low byte
+saved_cur_hi	= $99				; saved cursor_address high byte
 
 	.segment "CODE"
 	.org	$2800				; start of program
@@ -993,6 +1008,10 @@ parse_parm
 		beq	bold
 		cmp	#$2
 		beq	unbold
+		cmp	#$5
+		beq	bold			; blink mapped to bold (no blink on VBXE)
+		cmp	#$6
+		beq	normal_int		; normal intensity (alias)
 		cmp	#$7
 		beq	inverse
 		rts
@@ -1007,6 +1026,11 @@ bold		lda	text_color
 		rts
 		
 unbold		lda	text_color
+		and	#%11110111
+		sta	text_color
+		rts
+
+normal_int	lda	text_color
 		and	#%11110111
 		sta	text_color
 		rts
@@ -1260,7 +1284,13 @@ col_ok		sta	column
 		jsr	parse_param
 		cmp	#2
 		beq	clear_all
-		rts				; only n=2 supported for now
+		cmp	#1
+		bne	not_mode1
+		jmp	clear_to_cursor
+not_mode1	cmp	#0
+		beq	clear_from_cursor
+		rts
+
 clear_all	jsr	cursor_off
 		lda	#0
 		sta	row
@@ -1271,6 +1301,120 @@ clear_all	jsr	cursor_off
 		sta	cursor_address + 1
 		jsr	scroll_page
 		jmp	cursor_on
+
+clear_from_cursor				; n=0: clear from cursor to end of screen
+		jsr	cursor_off
+		lda	#23
+		sec
+		sbc	row			; rows remaining below cursor row
+		sta	counter+1		; use as outer loop count
+		lda	#79
+		sec
+		sbc	column			; chars remaining on current line
+		tax
+		beq	skip_first_line
+		ldy	#0
+cf_loop1	lda	#0
+		sta	(cursor_address), y
+		iny
+		lda	text_color
+		sta	(cursor_address), y
+		iny
+		dex
+		bne	cf_loop1
+skip_first_line
+		lda	counter+1
+		beq	cf_done
+		; save current cursor state, move to next row col 0
+		lda	row
+		pha
+		lda	column
+		pha
+		lda	cursor_address
+		pha
+		lda	cursor_address+1
+		pha
+		inc	row
+		lda	#0
+		sta	column
+		jsr	recalc_cursor
+cf_row_loop	ldx	#80
+		ldy	#0
+cf_loop2	lda	#0
+		sta	(cursor_address), y
+		iny
+		lda	text_color
+		sta	(cursor_address), y
+		iny
+		dex
+		bne	cf_loop2
+		inc	row
+		lda	#0
+		sta	column
+		jsr	recalc_cursor
+		dec	counter+1
+		bne	cf_row_loop
+		; restore cursor state
+		pla
+		sta	cursor_address+1
+		pla
+		sta	cursor_address
+		pla
+		sta	column
+		pla
+		sta	row
+cf_done		jmp	cursor_on
+
+clear_to_cursor					; n=1: clear from beginning of screen to cursor
+		jsr	cursor_off
+		; clear from vbxe_screen_top through cursor position (inclusive)
+		; count = row * 80 + column + 1
+		lda	#<vbxe_screen_top
+		sta	src_ptr
+		lda	#>vbxe_screen_top
+		sta	src_ptr+1
+		lda	row
+		tax
+		lda	#0
+		sta	counter
+		sta	counter+1
+		cpx	#0
+		beq	ct_add_col
+ct_add80	lda	counter
+		clc
+		adc	#80
+		sta	counter
+		bcc	ct_no_c
+		inc	counter+1
+ct_no_c		dex
+		bne	ct_add80
+ct_add_col	lda	counter
+		clc
+		adc	column
+		sta	counter
+		bcc	ct_no_c2
+		inc	counter+1
+ct_no_c2	inc	counter			; +1 to include cursor position
+		bne	ct_no_c3
+		inc	counter+1
+ct_no_c3	ldy	#0
+ct_loop		lda	counter
+		ora	counter+1
+		beq	ct_done
+		lda	#0
+		sta	(src_ptr), y
+		iny
+		lda	text_color
+		sta	(src_ptr), y
+		iny
+		bne	ct_noinc
+		inc	src_ptr+1
+ct_noinc	lda	counter
+		bne	ct_nodec
+		dec	counter+1
+ct_nodec	dec	counter
+		jmp	ct_loop
+ct_done		jmp	cursor_on
 .endproc
 
 ;###################################################################################################################
@@ -1278,13 +1422,143 @@ clear_all	jsr	cursor_off
 ; n=0: clear from cursor to end of line (default)
 ; currently only n=0 is supported
 
+;###################################################################################################################
+; SCP - Save Cursor Position (ESC[s)
+
+.proc SCP_adr
+		lda	row
+		sta	saved_row
+		lda	column
+		sta	saved_column
+		lda	cursor_address
+		sta	saved_cur_lo
+		lda	cursor_address + 1
+		sta	saved_cur_hi
+		rts
+.endproc
+
+;###################################################################################################################
+; RCP - Restore Cursor Position (ESC[u)
+
+.proc RCP_adr
+		jsr	cursor_off
+		lda	saved_row
+		sta	row
+		lda	saved_column
+		sta	column
+		lda	saved_cur_lo
+		sta	cursor_address
+		lda	saved_cur_hi
+		sta	cursor_address + 1
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; HVP - Horizontal and Vertical Position (ESC[r;cf) - same as CUP
+
+HVP_adr	= CUP_adr
+
+;###################################################################################################################
+; CNL - Cursor Next Line (ESC[nE) - move cursor to beginning of line n lines down (default 1)
+
+.proc CNL_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param
+		tay
+		bne	has_param
+		ldy	#1
+has_param
+move_loop	lda	row
+		cmp	#23
+		bcs	at_bottom
+		inc	row
+		dey
+		bne	move_loop
+at_bottom	lda	#0
+		sta	column
+		jsr	recalc_cursor
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; CPL - Cursor Previous Line (ESC[nF) - move cursor to beginning of line n lines up (default 1)
+
+.proc CPL_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param
+		tay
+		bne	has_param
+		ldy	#1
+has_param
+move_loop	lda	row
+		beq	at_top
+		dec	row
+		dey
+		bne	move_loop
+at_top		lda	#0
+		sta	column
+		jsr	recalc_cursor
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; CHA - Cursor Horizontal Absolute (ESC[nG) - move cursor to column n (default 1, 1-based)
+
+.proc CHA_adr
+		jsr	cursor_off
+		ldx	#0
+		jsr	parse_param
+		beq	default_col
+		sec
+		sbc	#1			; convert 1-based to 0-based
+		jmp	check_col
+default_col	lda	#0
+check_col	cmp	#80
+		bcc	col_ok
+		lda	#79
+col_ok		sta	column
+		jsr	recalc_cursor
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; SU - Scroll Up (ESC[nS) - scroll display up by n lines (default 1)
+
+.proc SU_adr
+		ldx	#0
+		jsr	parse_param
+		tay
+		bne	has_param
+		ldy	#1
+has_param
+		jsr	cursor_off
+scroll_loop	jsr	scroll_1d
+		dey
+		bne	scroll_loop
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; SD - Scroll Down (ESC[nT) - scroll down not easily done with current blitter setup, so just ignore for now
+
+SD_adr						; stub - not yet implemented
+		rts
+
+;###################################################################################################################
+; EL - Erase in Line (ESC[nK)
+
 .proc EL_adr
 		jsr	cursor_off
 		ldx	#0
 		jsr	parse_param		; get n (default 0)
-		cmp	#0
-		bne	done			; only n=0 supported for now
-		lda	#79
+		cmp	#1
+		beq	clear_to_cursor
+		cmp	#2
+		beq	clear_whole_line
+		; default: n=0, clear from cursor to end of line
+		lda	#80
 		sec
 		sbc	column			; A = number of chars to clear
 		tax
@@ -1293,12 +1567,64 @@ clear_all	jsr	cursor_off
 clear_loop	lda	#0			; null character
 		sta	(cursor_address), y
 		iny
-		lda	text_color		; current background color
+		lda	text_color
 		sta	(cursor_address), y
 		iny
 		dex
 		bne	clear_loop
 done		jmp	cursor_on
+
+clear_to_cursor					; n=1: clear from beginning of line to cursor
+		lda	column
+		clc
+		adc	#1			; include char at cursor
+		tax
+		beq	done
+		; calculate start of line address = cursor_address - column * 2
+		lda	column
+		asl	a			; column * 2 (2 bytes per char)
+		sta	counter			; temp storage
+		lda	cursor_address
+		sec
+		sbc	counter
+		sta	src_ptr
+		lda	cursor_address+1
+		sbc	#0
+		sta	src_ptr+1
+		ldy	#0
+ct_loop		lda	#0
+		sta	(src_ptr), y
+		iny
+		lda	text_color
+		sta	(src_ptr), y
+		iny
+		dex
+		bne	ct_loop
+		jmp	cursor_on
+
+clear_whole_line				; n=2: clear entire line
+		; calculate start of line address = cursor_address - column * 2
+		lda	column
+		asl	a			; column * 2 (2 bytes per char)
+		sta	counter			; temp storage
+		lda	cursor_address
+		sec
+		sbc	counter
+		sta	src_ptr
+		lda	cursor_address+1
+		sbc	#0
+		sta	src_ptr+1
+		ldx	#80
+		ldy	#0
+cw_loop		lda	#0
+		sta	(src_ptr), y
+		iny
+		lda	text_color
+		sta	(src_ptr), y
+		iny
+		dex
+		bne	cw_loop
+		jmp	cursor_on
 .endproc
 		
 .proc mem_move					; memory move routine.
@@ -1700,10 +2026,26 @@ ctrl_seq_table
 		.word	CUB_adr			; cursor back (left)
 		.byte	'H', 0
 		.word	CUP_adr			; cursor position
+		.byte	'f', 0
+		.word	HVP_adr			; horizontal/vertical position (alias for CUP)
 		.byte	'J', 0
 		.word	ED_adr			; erase in display
 		.byte	'K', 0
 		.word	EL_adr			; erase in line
+		.byte	's', 0
+		.word	SCP_adr			; save cursor position
+		.byte	'u', 0
+		.word	RCP_adr			; restore cursor position
+		.byte	'E', 0
+		.word	CNL_adr			; cursor next line
+		.byte	'F', 0
+		.word	CPL_adr			; cursor previous line
+		.byte	'G', 0
+		.word	CHA_adr			; cursor horizontal absolute
+		.byte	'S', 0
+		.word	SU_adr			; scroll up
+		.byte	'T', 0
+		.word	SD_adr			; scroll down (stub)
 		.byte	'm', 0
 		.word	SGR_adr			; set graphics rendition
 		.byte	0			; this shows the end of the list.
