@@ -108,6 +108,7 @@ saved_row	= $96				; saved cursor row for SCP/RCP
 saved_column	= $97				; saved cursor column for SCP/RCP
 saved_cur_lo	= $98				; saved cursor_address low byte
 saved_cur_hi	= $99				; saved cursor_address high byte
+device_type	= $9A				; 0 = R: serial, 1 = N: FujiNet
 
 	.segment "CODE"
 	.org	$2800				; start of program
@@ -496,6 +497,9 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 		sta	sendbufstart
 		sta	sendbufend
 
+; device type: 0 = R:, 1 = N:
+		sta	device_type
+
 ; turn the cursor on
 ; normally, the screen windows starts in a state of all 0.
 ; that is fine for the characters
@@ -529,81 +533,9 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 ;		lda	RTCLOK + 2
 ;		sta	starttime + 2
 
-; open the R: device
-		ldx	#$10
-		lda	#$03
-		sta	ICCOM+$10
-		lda	#<r_path
-		sta	ICBA+$10
-		lda	#>r_path
-		sta	ICBA+$11
-		lda	#$0D
-		sta	ICAX1+$10
-		lda	#0
-		sta	ICAX2+$10
-		jsr	CIOV
-		
-; configure it
-; for now, 9600 baud, 8 data bits, no status line checking,
+		jsr	open_r_device
 
-		ldx	#$10
-		lda	#36
-		sta	ICCOM+$10
-		lda	#<r_path
-		sta	ICBA+$10
-		lda	#>r_path
-		sta	ICBA+$11
-		lda	#14
-		sta	ICAX1+$10
-		lda	#0
-		sta	ICAX2+$10
-		jsr	CIOV
-		
-; no translation, ignore and do not change parity bit (input or output), and do not append LF to CR
- 
-		ldx	#$10
-		lda	#38
-		sta	ICCOM+$10
-		lda	#<r_path
-		sta	ICBA+$10
-		lda	#>r_path
-		sta	ICBA+$11
-		lda	#32
-		sta	ICAX1+$10
-		lda	#0
-		sta	ICAX2+$10
-		jsr	CIOV
-		
-; turn on DTR and RTS, and don't change xmt state
-
-		ldx	#$10
-		lda	#34
-		sta	ICCOM+$10
-		lda	#<r_path
-		sta	ICBA+$10
-		lda	#>r_path
-		sta	ICBA+$11
-		lda	#192+48
-		sta	ICAX1+$10
-		lda	#0
-		sta	ICAX2+$10
-		jsr	CIOV
-		
-; start concurrent I/O
-
-		ldx	#$10
-		lda	#40
-		sta	ICCOM+$10
-		lda	#<r_path
-		sta	ICBA+$10
-		lda	#>r_path
-		sta	ICBA+$11
-		lda	#0
-		sta	ICAX1+$10
-		sta	ICAX2+$10
-		jsr	CIOV
-		
-		; set up the KB interupt handler now that R: is open.
+		; set up the KB interupt handler now that device is open.
 		sei				; disable interupts before we set the new vector
 		lda	#<kbd_irq
 		sta	VKEYBD
@@ -611,8 +543,12 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 		sta	VKEYBD+1
 		cli				; re-enable interupts
 		
-wait_for_byte	jsr	check_sendbuf		; check to see if the send buffer has characters to be sent
+wait_for_byte	jsr	check_sendbuf
+		jsr	recv_from_device
+		jmp	wait_for_byte
 
+.proc recv_from_device
+; poll the R: concurrent I/O buffer; read and process any waiting bytes.
 		ldx	#$10
 		lda	#13
 		sta	ICCOM+$10
@@ -624,14 +560,16 @@ wait_for_byte	jsr	check_sendbuf		; check to see if the send buffer has character
 		sta	ICAX1+$10
 		sta	ICAX2+$10
 		jsr	CIOV
-		
+
 		lda	DVSTAT1			; DVSTAT1 and 2 hold the number of bytes in the input buffer
 		ora	DVSTAT2
-		beq	wait_for_byte		; if they're 0, keep waiting
-		
-.scope						; read bytes - right now this will get a max of 255 bytes, even though the buffer is
-		ldx	#$10			; 256 bytes. This could be fixed later. recvbuflen = 0 could mean 256, since the only
-		lda	#$07			; time execution reaches here is if there are more than 0 bytes to be processed.
+		beq	done			; nothing waiting, return
+
+; read bytes - right now this will get a max of 255 bytes, even though the buffer is
+; 256 bytes. This could be fixed later. recvbuflen = 0 could mean 256, since the only
+; time execution reaches here is if there are more than 0 bytes to be processed.
+		ldx	#$10
+		lda	#$07
 		sta	ICCOM+$10
 		lda	#<recv_buffer
 		sta	ICBA + $10
@@ -648,8 +586,8 @@ storebuflen	sta	ICBL + $10
 		sta	ICBL + $11
 		lda	#$0D
 		sta	ICAX1 + $10		; turns out you need this for GET or it doesn't work.
-		jsr	CIOV			; so after this, the receive buffer should have characters in it to be processed
-		
+		jsr	CIOV
+
 		ldy	#0
 next_byte	lda	recv_buffer, y		; get character from buffer
 		sta	temp_char		; put it here to pass to process_char
@@ -664,10 +602,9 @@ next_byte	lda	recv_buffer, y		; get character from buffer
 		iny				; next character
 
 		cpy	recvbuflen
-		bne	next_byte		; if they're not equal, we get the next byte
-		
-		jmp	wait_for_byte
-.endscope
+		bne	next_byte
+done		rts
+.endproc
 
 .proc process_char
 		bit	ctrl_seq_flg
@@ -1810,10 +1747,84 @@ not_empty	ldx	#$10			; for now, we send one character out of the buffer
 		jmp	CIOV			; and send it.
 .endproc
 		
+.proc open_r_device
+; open and fully configure the R: serial device on IOCB 1.
+
+; open
+		ldx	#$10
+		lda	#$03
+		sta	ICCOM+$10
+		lda	#<r_path
+		sta	ICBA+$10
+		lda	#>r_path
+		sta	ICBA+$11
+		lda	#$0D
+		sta	ICAX1+$10
+		lda	#0
+		sta	ICAX2+$10
+		jsr	CIOV
+
+; 9600 baud, 8 data bits, no status line checking
+		ldx	#$10
+		lda	#36
+		sta	ICCOM+$10
+		lda	#<r_path
+		sta	ICBA+$10
+		lda	#>r_path
+		sta	ICBA+$11
+		lda	#14
+		sta	ICAX1+$10
+		lda	#0
+		sta	ICAX2+$10
+		jsr	CIOV
+
+; no translation, ignore parity, no LF append
+		ldx	#$10
+		lda	#38
+		sta	ICCOM+$10
+		lda	#<r_path
+		sta	ICBA+$10
+		lda	#>r_path
+		sta	ICBA+$11
+		lda	#32
+		sta	ICAX1+$10
+		lda	#0
+		sta	ICAX2+$10
+		jsr	CIOV
+
+; turn on DTR and RTS
+		ldx	#$10
+		lda	#34
+		sta	ICCOM+$10
+		lda	#<r_path
+		sta	ICBA+$10
+		lda	#>r_path
+		sta	ICBA+$11
+		lda	#192+48
+		sta	ICAX1+$10
+		lda	#0
+		sta	ICAX2+$10
+		jsr	CIOV
+
+; start concurrent I/O
+		ldx	#$10
+		lda	#40
+		sta	ICCOM+$10
+		lda	#<r_path
+		sta	ICBA+$10
+		lda	#>r_path
+		sta	ICBA+$11
+		lda	#0
+		sta	ICAX1+$10
+		sta	ICAX2+$10
+		jmp	CIOV
+.endproc
+
 font_path	.byte	"D:IBMPC.FNT", $9B
 pallette_path	.byte	"D:ANSI.PAL", $9B
 ;test_file	.byte	"D:TEST.ANS", $9B
 r_path		.byte	"R1:", $9B
+n_url_buf	.res	128, $00		; FujiNet URL entered at startup
 
 ;temp_char	.byte	$00			; temporary location for storing a character
 
