@@ -112,6 +112,7 @@ device_type	= $9A				; 0 = R: serial, 1 = N: FujiNet
 n_err_code	= $9B				; saved error code from open_n_device
 n_unit		= $9C				; FujiNet unit number (1–8), parsed from URL
 n_trip		= $9D				; PROCEED interrupt trip flag (0=idle, 1=FujiNet has data)
+lf_mode		= $9E				; LF-as-CRLF flag (0=LF only, 1=LF implies CR+LF)
 
 	.segment "CODE"
 	.org	$2800				; start of program
@@ -503,6 +504,11 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 ; device type: 0 = R:, 1 = N:
 		sta	device_type
 
+; LF-as-CRLF mode: default on (most hosts send bare LF expecting terminal to add CR)
+		lda	#$01
+		sta	lf_mode
+		lda	#$00
+
 ; turn the cursor on
 ; normally, the screen windows starts in a state of all 0.
 ; that is fine for the characters
@@ -888,10 +894,16 @@ done		rts
 		lda	#0			; if it is, we clear the escape flag for the next character.
 		sta	ctrl_seq_flg
 		lda	temp_char
+		cmp	#$37			; ESC '7' = DECSC (save cursor)
+		beq	do_decsc
+		cmp	#$38			; ESC '8' = DECRC (restore cursor)
+		beq	do_decrc
 		and	#%11100000		; AND mask for C1 set
 		cmp	#$40			; if it's $40 after ANDing,
 		beq	is_C1			; it's part of the C1 set
 		rts				; otherwise, it's some other character preceded by escape, which we do nothing with (don't even print it)
+do_decsc	jmp	SCP_adr
+do_decrc	jmp	RCP_adr
 
 .proc is_ctrl_seq
 		lda	temp_char
@@ -945,17 +957,17 @@ jump_C1		jmp	$0000
 .endproc
 		
 .proc do_ctrl_seq
+		lda	#0
+		sta	inter_byte		; default: no intermediate byte
 		ldx	ctrl_seq_index
 		dex
 		dex
+		bmi	find_entry		; only final byte present (index was 1), skip intermediate check
 		lda	ctrl_seq_buf,x
 		cmp	#$30
-		bcs	no_inter_byte		; if this byte is less than #$30, it's an intermediate byte.
+		bcs	find_entry		; $30+ is a parameter byte, not intermediate
 		sta	inter_byte
-		jmp	find_entry
-no_inter_byte	lda	#0
-		sta	inter_byte
-		
+
 find_entry	ldx	#0
 next_entry	lda	ctrl_seq_table,x	; get final byte from table
 		beq	last_entry		; if the last entry is reached, jump
@@ -1055,7 +1067,10 @@ VT_adr						; Vertical Tab. for now, same as LF
 IND_adr						; Index is same as LF
 .proc LF_adr					; Line Feed moves the cursor down one line BUT only if we're not on the last line
 						; down one line is forward 80 columns, or 160 bytes
-		jsr	cursor_off
+		lda	lf_mode			; if lf_mode set, LF implies CR+LF
+		beq	lf_no_cr
+		jsr	CR_adr
+lf_no_cr	jsr	cursor_off
 		lda	row
 		cmp	#23			; if row is at 24,
 		beq	scroll			; we scroll
