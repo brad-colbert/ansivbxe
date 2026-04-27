@@ -113,6 +113,7 @@ n_err_code	= $9B				; saved error code from open_n_device
 n_unit		= $9C				; FujiNet unit number (1–8), parsed from URL
 n_trip		= $9D				; PROCEED interrupt trip flag (0=idle, 1=FujiNet has data)
 lf_mode		= $9E				; LF-as-CRLF flag (0=LF only, 1=LF implies CR+LF)
+saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
 
 	.segment "CODE"
 	.org	$2800				; start of program
@@ -138,6 +139,8 @@ start		lda	core_version
 core_fx						; for FX core compatible versions (1.2x, 1.26, 1.40, etc)
 						; we'll accept the FX core and proceed without strict version checking
 
+		lda	SDMCTL			; save current DMA control before VBXE takes over
+		sta	saved_sdmctl
 		lda	#$20			; shut off ANTIC DMA except instruction fetch
 		sta	SDMCTL
 
@@ -714,6 +717,7 @@ wait_for_return
 		lda	#$00
 		sta	ICBL+1
 		jsr	CIOV
+		jsr	restore_graphics
 		jmp	(DOSVEC)
 
 device_open
@@ -2408,6 +2412,27 @@ ok		ldy	#$01			; positive Y = success
 		sta	n_trip
 		pla
 		rti
+.endproc
+
+.proc restore_graphics
+; Make VBXE overlay invisible, then restore SDMCTL for normal ANTIC display.
+; Strategy: change the XDL's first OVOFF+RPTL entry to cover ALL 216 scanlines,
+; then keep XDL *enabled* (video_control=$01) so VBXE processes the OVOFF entry
+; each frame and outputs nothing. Setting video_control=$00 kills XDL processing
+; before the OVOFF takes effect, leaving VBXE frozen on the last rendered frame.
+; XDL lives at VBXE $0800; the RPTL count byte is at $0802 → CPU $A802 (bank 0).
+		lda	#$80
+		sta	memac_bank_sel			; bank 0: VBXE $0000-$0FFF at $A000-$AFFF
+		lda	#216-1				; OVOFF for all visible scanlines
+		sta	vbxe_mem_base + $802		; XDL line-count byte at VBXE $0802
+		lda	#$01				; XDL enabled, color 0 transparent (no_trans=0)
+		sta	video_control			; VBXE now renders nothing — GTIA shows through
+		lda	#$00
+		sta	memac_bank_sel			; close MEMAC window
+		sta	memac_control			; disable MEMAC A CPU access
+		lda	saved_sdmctl			; restore original ANTIC DMA control
+		sta	SDMCTL
+		rts
 .endproc
 
 n_url_default	.byte	"N1:SSH://bbs.4wheelham.com:2222", $9B	; default URL
