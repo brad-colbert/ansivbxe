@@ -109,6 +109,9 @@ saved_column	= $97				; saved cursor column for SCP/RCP
 saved_cur_lo	= $98				; saved cursor_address low byte
 saved_cur_hi	= $99				; saved cursor_address high byte
 device_type	= $9A				; 0 = R: serial, 1 = N: FujiNet
+n_err_code	= $9B				; saved error code from open_n_device
+n_unit		= $9C				; FujiNet unit number (1–8), parsed from URL
+n_trip		= $9D				; PROCEED interrupt trip flag (0=idle, 1=FujiNet has data)
 
 	.segment "CODE"
 	.org	$2800				; start of program
@@ -533,24 +536,233 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 ;		lda	RTCLOK + 2
 ;		sta	starttime + 2
 
-		jsr	open_r_device
+;###################################################################################################################
+; device selection: prompt the user to choose R: serial or N: FujiNet
 
-		; set up the KB interupt handler now that device is open.
-		sei				; disable interupts before we set the new vector
+; show selection prompt on VBXE display
+		lda	#<select_prompt
+		ldx	#>select_prompt
+		jsr	print_str
+
+; make sure IOCB 2 is closed before we open K: on it
+		ldx	#$20
+		lda	#$0C
+		sta	ICCOM+$20
+		jsr	CIOV
+
+; open K: on IOCB 2 for immediate (non-line-buffered) keyboard reads
+		ldx	#$20
+		lda	#$03			; CMD_OPEN
+		sta	ICCOM+$20
+		lda	#<kbd_dev
+		sta	ICBA+$20
+		lda	#>kbd_dev
+		sta	ICBA+$21
+		lda	#$04			; OREAD
+		sta	ICAX1+$20
+		lda	#$00
+		sta	ICAX2+$20
+		jsr	CIOV
+
+; read one key (K: returns immediately on key press, no Enter needed)
+		ldx	#$20
+		lda	#$07			; GET_CHARS
+		sta	ICCOM+$20
+		lda	#<select_buf
+		sta	ICBA+$20
+		lda	#>select_buf
+		sta	ICBA+$21
+		lda	#$01
+		sta	ICBL+$20
+		lda	#$00
+		sta	ICBL+$21
+		jsr	CIOV
+
+		lda	select_buf
+		cmp	#'N'
+		beq	choose_n
+		cmp	#'n'
+		beq	choose_n
+
+choose_r
+; echo 'R' to VBXE, close K:, open R: serial device
+		lda	#'R'
+		sta	temp_char
+		jsr	process_char
+		jsr	CR_adr
+		jsr	LF_adr
+		ldx	#$20
+		lda	#$0C			; CMD_CLOSE K:
+		sta	ICCOM+$20
+		jsr	CIOV
+		jsr	open_r_device
+		jmp	device_open
+
+choose_n
+; echo 'N' to VBXE, show URL prompt, read URL from keyboard
+		lda	#'N'
+		sta	temp_char
+		jsr	process_char
+		jsr	CR_adr
+		jsr	LF_adr
+		lda	#<url_prompt
+		ldx	#>url_prompt
+		jsr	print_str
+
+; read URL into n_url_buf, echoing each character to VBXE
+		lda	#<n_url_buf
+		sta	src_ptr
+		lda	#>n_url_buf
+		sta	src_ptr+1
+		jsr	read_line_vbxe		; closes K: when done
+
+; if the user pressed Enter with no URL, copy the default
+		lda	n_url_buf
+		cmp	#$9B
+		bne	url_entered
+		ldy	#$FF
+copy_default	iny
+		lda	n_url_default,y
+		sta	n_url_buf,y
+		cmp	#$9B
+		bne	copy_default
+
+url_entered
+; parse unit number now — needed before nlogin (which precedes open)
+		ldy	#$01
+		lda	n_url_buf,y
+		cmp	#':'
+		bne	pre_digit
+		lda	#$01
+		bne	pre_store
+pre_digit	sec
+		sbc	#'0'
+pre_store	sta	n_unit
+
+		lda	#$01
+		sta	device_type
+
+; clear caps lock so Shift key produces lowercase during credential entry
+; (Atari convention: unshifted = uppercase, Shift+key = lowercase)
+		lda	#$00
+		sta	SHFLOK
+
+; prompt for username (for SSH auth; press Enter for none)
+		lda	#<login_prompt
+		ldx	#>login_prompt
+		jsr	print_str
+		jsr	open_k_iocb2
+		lda	#<login_buf
+		sta	src_ptr
+		lda	#>login_buf
+		sta	src_ptr+1
+		jsr	read_line_vbxe
+
+; prompt for password
+		lda	#<password_prompt
+		ldx	#>password_prompt
+		jsr	print_str
+		jsr	open_k_iocb2
+		lda	#<password_buf
+		sta	src_ptr
+		lda	#>password_buf
+		sta	src_ptr+1
+		jsr	read_line_vbxe
+
+; pre-configure SSH credentials via $FD/$FE before open (matches netcat reference)
+		jsr	nlogin_n_device
+
+		lda	#<connecting_msg
+		ldx	#>connecting_msg
+		jsr	print_str
+
+		jsr	open_n_device
+		bmi	n_open_failed
+
+		lda	#<n_open_ok_msg
+		ldx	#>n_open_ok_msg
+		jsr	print_str
+		jmp	device_open
+
+n_open_failed
+		sty	n_err_code		; save CIO error code before any other call corrupts Y
+		lda	#<no_n_msg
+		ldx	#>no_n_msg
+		jsr	print_str		; "FujiNet open failed: $"
+		lda	n_err_code
+		jsr	print_hex_byte		; display two hex digits of error code
+		lda	#<press_return_msg
+		ldx	#>press_return_msg
+		jsr	print_str
+		jmp	wait_for_return
+
+wait_for_return
+		lda	#$05			; GET_REC on IOCB 0 — waits for Enter
+		sta	ICCOM
+		lda	#<select_buf
+		sta	ICBA
+		lda	#>select_buf
+		sta	ICBA+1
+		lda	#$04
+		sta	ICBL
+		lda	#$00
+		sta	ICBL+1
+		jsr	CIOV
+		jmp	(DOSVEC)
+
+device_open
+; set up the KB interrupt handler now that device is open.
+		sei				; disable interrupts before we set the new vector
 		lda	#<kbd_irq
 		sta	VKEYBD
 		lda	#>kbd_irq
 		sta	VKEYBD+1
-		cli				; re-enable interupts
-		
+		cli				; re-enable interrupts
+
+; for N: install PROCEED interrupt so FujiNet signals when data is available
+		lda	device_type
+		beq	wait_for_byte		; R: — no PROCEED interrupt needed
+
+		lda	PACTL
+		sta	n_old_pactl
+		and	#$FE			; disable PROCEED IRQ while changing vector
+		sta	PACTL
+		lda	VPRCED
+		sta	n_old_vprced
+		lda	VPRCED+1
+		sta	n_old_vprced+1
+		lda	#<n_proceed_irq
+		sta	VPRCED
+		lda	#>n_proceed_irq
+		sta	VPRCED+1
+		lda	#$00
+		sta	n_trip			; no data waiting yet
+		lda	PACTL
+		ora	#$01			; enable PROCEED IRQ
+		sta	PACTL
+
 wait_for_byte	jsr	check_sendbuf
-		jsr	recv_from_device
+		lda	device_type
+		beq	r_do_recv		; R: — always poll
+		lda	n_trip			; N: — only recv when FujiNet has signalled data
+		beq	wait_for_byte
+r_do_recv	jsr	recv_from_device
+		lda	device_type
+		beq	wait_for_byte		; R: — no trip flag management
+		lda	#$00
+		sta	n_trip			; clear trip flag after servicing
+		lda	PACTL
+		ora	#$01
+		sta	PACTL			; re-arm PROCEED interrupt
 		jmp	wait_for_byte
 
 .proc recv_from_device
-; poll the R: concurrent I/O buffer; read and process any waiting bytes.
+		lda	device_type
+		bne	n_recv
+
+; R: path — poll concurrent I/O status buffer
 		ldx	#$10
-		lda	#13
+		lda	#13			; CMD_STATUS
 		sta	ICCOM+$10
 		lda	#<r_path
 		sta	ICBA+$10
@@ -560,14 +772,77 @@ wait_for_byte	jsr	check_sendbuf
 		sta	ICAX1+$10
 		sta	ICAX2+$10
 		jsr	CIOV
+		jmp	check_dvstat
 
-		lda	DVSTAT1			; DVSTAT1 and 2 hold the number of bytes in the input buffer
+; N: path — SIO STATUS to check bytes waiting, then SIO READ
+n_recv		lda	#FUJI_ID
+		sta	DDEVIC
+		lda	n_unit
+		sta	DUNIT
+		lda	#'S'			; Status command
+		sta	DCOMND
+		lda	#$40			; read direction (FujiNet sends us 4 status bytes)
+		sta	DSTATS
+		lda	#<DVSTAT0
+		sta	DBUFLO
+		lda	#>DVSTAT0
+		sta	DBUFHI
+		lda	#FUJI_TIMEOUT
+		sta	DTIMLO
+		lda	#$00
+		sta	DTIMHI
+		lda	#$04			; 4 status bytes into DVSTAT0-DVSTAT3
+		sta	DBYTLO
+		lda	#$00
+		sta	DBYTHI
+		sta	DAUX1			; DAUX must be 0 for STATUS (not the byte count)
+		sta	DAUX2
+		jsr	SIOV
+		lda	DVSTAT0			; bytes waiting (lo + hi)
+		ora	DVSTAT1
+		bne	n_recv_read
+		jmp	done			; nothing waiting
+n_recv_read
+
+; Clamp to 255 bytes max
+		lda	DVSTAT1
+		bne	use_max
+		lda	DVSTAT0
+		bne	use_lo
+use_max		lda	#$FF
+use_lo		sta	recvbuflen		; how many bytes to read
+
+; SIO READ
+		lda	#FUJI_ID
+		sta	DDEVIC
+		lda	n_unit
+		sta	DUNIT
+		lda	#'R'			; Read command
+		sta	DCOMND
+		lda	#$40			; read direction
+		sta	DSTATS
+		lda	#<recv_buffer
+		sta	DBUFLO
+		lda	#>recv_buffer
+		sta	DBUFHI
+		lda	#FUJI_TIMEOUT
+		sta	DTIMLO
+		lda	#$00
+		sta	DTIMHI
+		lda	recvbuflen
+		sta	DBYTLO
+		sta	DAUX1
+		lda	#$00
+		sta	DBYTHI
+		sta	DAUX2
+		jsr	SIOV
+		jmp	process_bytes
+
+check_dvstat	lda	DVSTAT1			; DVSTAT1 and 2 hold the number of bytes in the input buffer
 		ora	DVSTAT2
 		beq	done			; nothing waiting, return
 
-; read bytes - right now this will get a max of 255 bytes, even though the buffer is
-; 256 bytes. This could be fixed later. recvbuflen = 0 could mean 256, since the only
-; time execution reaches here is if there are more than 0 bytes to be processed.
+; R: read bytes — request exactly DVSTAT bytes via GET_CHARS
 		ldx	#$10
 		lda	#$07
 		sta	ICCOM+$10
@@ -588,7 +863,7 @@ storebuflen	sta	ICBL + $10
 		sta	ICAX1 + $10		; turns out you need this for GET or it doesn't work.
 		jsr	CIOV
 
-		ldy	#0
+process_bytes	ldy	#0
 next_byte	lda	recv_buffer, y		; get character from buffer
 		sta	temp_char		; put it here to pass to process_char
 		tya
@@ -1715,6 +1990,115 @@ bounce		lda	#$30			; we still set the repeat timer on a bounce I guess
 		rti				; RTI because interupt
 .endproc
 		
+.proc print_str
+; Display a $9B-terminated string on the VBXE terminal.
+; A = low byte of string address, X = high byte. Trashes A, X, Y.
+; Advances src_ptr each iteration so process_char (which corrupts Y) is safe.
+		sta	src_ptr
+		stx	src_ptr+1
+next_char	ldy	#$00
+		lda	(src_ptr),y
+		cmp	#$9B
+		beq	done
+		sta	temp_char
+		jsr	process_char		; may corrupt all registers including Y
+		inc	src_ptr
+		bne	next_char
+		inc	src_ptr+1
+		jmp	next_char
+done		rts
+.endproc
+
+.proc print_hex_byte
+; Display a byte in A as two uppercase hex digits on the VBXE terminal.
+; Uses the classic 6502 jsr-into-shared-tail trick: jsr hex_nibble for the
+; high nibble returns here (via process_char's rts), then falls through to
+; hex_nibble again for the low nibble, tail-calling process_char back to caller.
+		pha
+		lsr
+		lsr
+		lsr
+		lsr			; high nibble in low 4 bits
+		jsr	hex_nibble
+		pla
+		and	#$0F		; low nibble; fall through to hex_nibble
+hex_nibble
+		cmp	#10
+		bcc	@digit
+		adc	#6		; carry set from cmp, so +7 total; biases 10→'A'
+@digit		adc	#'0'
+		sta	temp_char
+		jmp	process_char
+.endproc
+
+.proc open_k_iocb2
+; Close then open K: on IOCB 2 for single-character reads. Called before each read_line_vbxe.
+		ldx	#$20
+		lda	#$0C			; CMD_CLOSE (harmless if already closed)
+		sta	ICCOM+$20
+		jsr	CIOV
+		lda	#$03			; CMD_OPEN
+		sta	ICCOM+$20
+		lda	#<kbd_dev
+		sta	ICBA+$20
+		lda	#>kbd_dev
+		sta	ICBA+$21
+		lda	#$04			; OREAD
+		sta	ICAX1+$20
+		lda	#$00
+		sta	ICAX2+$20
+		jmp	CIOV
+.endproc
+
+.proc read_line_vbxe
+; Read a line from K: (IOCB 2), echoing each character to the VBXE terminal.
+; On entry: src_ptr = destination buffer. Buffer is $9B-terminated on return.
+; Handles BS ($08). Closes K: (IOCB 2) when Enter is pressed.
+; Uses counter ($89) as buffer index so Y corruption from CIOV/process_char is harmless.
+		lda	#$00
+		sta	counter			; buffer index
+get_char	ldx	#$20
+		lda	#$07			; GET_CHARS (one character, immediate)
+		sta	ICCOM+$20
+		lda	#<temp_char		; read directly into temp_char ($008D)
+		sta	ICBA+$20
+		lda	#>temp_char
+		sta	ICBA+$21
+		lda	#$01
+		sta	ICBL+$20
+		lda	#$00
+		sta	ICBL+$21
+		jsr	CIOV			; Y is corrupted by CIOV (returns status in Y)
+
+		lda	temp_char
+		cmp	#$9B			; Enter?
+		beq	done
+		cmp	#$08			; Backspace?
+		beq	do_bs
+
+		ldy	counter
+		sta	(src_ptr),y		; store character in buffer
+		inc	counter
+		beq	done			; buffer full (256 chars)
+		jsr	process_char		; echo to VBXE (temp_char set, Y corruption OK)
+		jmp	get_char
+
+do_bs		lda	counter
+		beq	get_char		; nothing to delete, ignore
+		dec	counter
+		jsr	BS_adr			; move cursor left on VBXE (Y corruption OK)
+		jmp	get_char
+
+done		ldy	counter
+		lda	#$9B
+		sta	(src_ptr),y		; terminate buffer with EOL
+		ldx	#$20
+		lda	#$0C			; CMD_CLOSE K:
+		sta	ICCOM+$20
+		jsr	CIOV
+		rts
+.endproc
+
 .proc check_sendbuf				; checks to see if the send buffer is empty, and sends it if it's not.
 ; in the future, there may be a few different cases handled here.
 ; the first is an empty buffer, so you return.
@@ -1732,19 +2116,50 @@ bounce		lda	#$30			; we still set the repeat timer on a bounce I guess
 		
 		rts				; or return otherwise
 
-not_empty	ldx	#$10			; for now, we send one character out of the buffer
-		lda	#$0B			; this will probably be the most common non-empty possibility anyway
-		sta	ICCOM+$10		; it'll still handle multiple characters in the buffer too, just a little more slowly
-		lda	#$00			; buffer length 0 uses character in accumulator
-		sta	ICBL + $10
-		sta	ICBL + $11
+not_empty	inc	sendbufstart		; advance first (kbd_irq advances end before writing, so we advance before reading)
+		ldy	sendbufstart
+		lda	send_buffer,y
+		sta	send_byte_buf		; SIO needs a buffer address, store byte there
+
+		lda	device_type
+		bne	n_send
+
+; R: send — CIO PUT_CHARS on IOCB 1
+		ldx	#$10
+		lda	#$0B
+		sta	ICCOM+$10
+		lda	#$00
+		sta	ICBL+$10
+		sta	ICBL+$11
 		lda	#$0D
-		sta	ICAX1 + $10		; turns out you need this for GET or it doesn't work.
-		ldy	sendbufstart		; get index of last byte sent (use Y because X isn't free)
-		iny				; increment it to get the next byte to be sent
-		sty	sendbufstart		; update it
-		lda	send_buffer, y		; get the character at the index
-		jmp	CIOV			; and send it.
+		sta	ICAX1+$10
+		lda	send_byte_buf
+		jmp	CIOV
+
+; N: send — SIO Write one byte to FujiNet
+n_send		lda	#FUJI_ID
+		sta	DDEVIC
+		lda	n_unit
+		sta	DUNIT
+		lda	#'W'			; Write command
+		sta	DCOMND
+		lda	#$80			; write direction
+		sta	DSTATS
+		lda	#<send_byte_buf
+		sta	DBUFLO
+		lda	#>send_byte_buf
+		sta	DBUFHI
+		lda	#FUJI_TIMEOUT
+		sta	DTIMLO
+		lda	#$00
+		sta	DTIMHI
+		lda	#$01			; one byte
+		sta	DBYTLO
+		sta	DAUX1
+		lda	#$00
+		sta	DBYTHI
+		sta	DAUX2
+		jmp	SIOV
 .endproc
 		
 .proc open_r_device
@@ -1824,7 +2239,178 @@ font_path	.byte	"D:IBMPC.FNT", $9B
 pallette_path	.byte	"D:ANSI.PAL", $9B
 ;test_file	.byte	"D:TEST.ANS", $9B
 r_path		.byte	"R1:", $9B
-n_url_buf	.res	128, $00		; FujiNet URL entered at startup
+n_url_buf	.res	256, $00		; FujiNet URL buffer — must be 256 bytes (FujiNet SIO OPEN expects exactly 256)
+
+.proc open_n_device
+; Open a FujiNet connection via direct SIO (no N: CIO handler required).
+; URL is in n_url_buf.  Unit number is parsed from the URL (N1:, N2:, etc.;
+; bare N: defaults to unit 1).  Returns Y=$01 (positive) on success,
+; Y=SIO error (negative) on failure.  Also saves unit in n_unit for recv/send.
+
+; Parse unit number: n_url_buf[1] is ':' for bare N:, or digit for N1:-N8:
+		ldy	#$01
+		lda	n_url_buf,y
+		cmp	#':'
+		bne	has_digit
+		lda	#$01			; bare N: → unit 1
+		bne	store_unit
+has_digit	sec
+		sbc	#'0'
+store_unit	sta	n_unit
+
+; SIO OPEN: send URL to FujiNet device $71
+		lda	#FUJI_ID
+		sta	DDEVIC
+		lda	n_unit
+		sta	DUNIT
+		lda	#'O'			; Open command
+		sta	DCOMND
+		lda	#$80			; write direction (sending URL spec)
+		sta	DSTATS
+		lda	#<n_url_buf
+		sta	DBUFLO
+		lda	#>n_url_buf
+		sta	DBUFHI
+		lda	#FUJI_TIMEOUT
+		sta	DTIMLO
+		lda	#$00
+		sta	DTIMHI
+		lda	#$00			; 256 bytes (FujiNet OPEN always expects 256-byte URL buffer)
+		sta	DBYTLO
+		lda	#$01
+		sta	DBYTHI
+		lda	#$0C			; OUPDATE (read+write)
+		sta	DAUX1
+		lda	#$00			; no translation
+		sta	DAUX2
+		jsr	SIOV
+
+; SIOV stores result in DSTATS: $01=success, negative=error
+		lda	DSTATS
+		cmp	#$01
+		beq	ok
+		cmp	#$90			; DERROR — call STATUS to get extended error and clean up
+		bne	not_derror
+		jsr	n_status_sio
+		lda	#$90			; return DERROR ($90, bit 7 set → bmi taken)
+not_derror	tay
+		rts
+ok		ldy	#$01			; positive Y = success
+		rts
+.endproc
+
+.proc n_status_sio
+; Call FujiNet STATUS SIO command. Fills DVSTAT0–DVSTAT3. Requires n_unit set.
+		lda	#FUJI_ID
+		sta	DDEVIC
+		lda	n_unit
+		sta	DUNIT
+		lda	#'S'
+		sta	DCOMND
+		lda	#$40			; DREAD
+		sta	DSTATS
+		lda	#<DVSTAT0
+		sta	DBUFLO
+		lda	#>DVSTAT0
+		sta	DBUFHI
+		lda	#FUJI_TIMEOUT
+		sta	DTIMLO
+		lda	#$00
+		sta	DTIMHI
+		lda	#$04
+		sta	DBYTLO
+		lda	#$00
+		sta	DBYTHI
+		sta	DAUX1
+		sta	DAUX2
+		jmp	SIOV
+.endproc
+
+.proc nlogin_n_device
+; Pre-configure SSH credentials via SIO commands $FD (login) and $FE (password).
+; Called before open_n_device. Errors ignored — non-SSH connections will reject gracefully.
+; Requires n_unit set.
+		lda	#FUJI_ID
+		sta	DDEVIC
+		lda	n_unit
+		sta	DUNIT
+		lda	#$FD			; login command
+		sta	DCOMND
+		lda	#$80			; DWRITE
+		sta	DSTATS
+		lda	#<login_buf
+		sta	DBUFLO
+		lda	#>login_buf
+		sta	DBUFHI
+		lda	#FUJI_TIMEOUT
+		sta	DTIMLO
+		lda	#$00			; 256-byte buffer (hi byte = 1)
+		sta	DTIMHI
+		sta	DBYTLO
+		lda	#$01
+		sta	DBYTHI
+		lda	#$00
+		sta	DAUX1
+		sta	DAUX2
+		jsr	SIOV			; send username
+		lda	#$FE			; password command (reuse most params)
+		sta	DCOMND
+		lda	#<password_buf
+		sta	DBUFLO
+		lda	#>password_buf
+		sta	DBUFHI
+		jsr	SIOV			; send password
+		rts
+.endproc
+
+.proc nclose_n_device
+; Send FujiNet CLOSE SIO command. Requires n_unit set.
+		lda	#FUJI_ID
+		sta	DDEVIC
+		lda	n_unit
+		sta	DUNIT
+		lda	#'C'
+		sta	DCOMND
+		lda	#$00
+		sta	DSTATS
+		sta	DBUFLO
+		sta	DBUFHI
+		lda	#FUJI_TIMEOUT
+		sta	DTIMLO
+		lda	#$00
+		sta	DTIMHI
+		sta	DBYTLO
+		sta	DBYTHI
+		sta	DAUX1
+		sta	DAUX2
+		jmp	SIOV
+.endproc
+
+.proc n_proceed_irq
+; VPRCED interrupt handler — set n_trip=1 when FujiNet PROCEED line goes high.
+; PLA+RTI matches the Atari OS convention: OS pushes A before jumping through VPRCED.
+		lda	#$01
+		sta	n_trip
+		pla
+		rti
+.endproc
+
+n_url_default	.byte	"N1:SSH://bbs.4wheelham.com:2222", $9B	; default URL
+send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
+select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
+url_prompt	.byte	"FujiNet URL (Enter=default): ", $9B
+no_n_msg	.byte	"FujiNet open failed: $", $9B
+press_return_msg	.byte	" - Press Return.", $9B
+kbd_dev		.byte	"K:", $9B
+select_buf	.res	4, $00
+connecting_msg	.byte	"Connecting...", $9B
+n_open_ok_msg	.byte	"Connected.", $9B
+login_prompt	.byte	"Username (Enter=none): ", $9B
+password_prompt	.byte	"Password (Enter=none): ", $9B
+n_old_vprced	.res	2, $00			; saved VPRCED vector
+n_old_pactl	.byte	$00			; saved PACTL state
+login_buf	.res	256, $00		; username buffer (256 bytes — FujiNet $FD expects 256)
+password_buf	.res	256, $00		; password buffer (256 bytes — FujiNet $FE expects 256)
 
 ;temp_char	.byte	$00			; temporary location for storing a character
 
