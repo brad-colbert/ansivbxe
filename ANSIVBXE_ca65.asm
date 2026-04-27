@@ -608,57 +608,89 @@ choose_r
 		jmp	device_open
 
 choose_n
-; echo 'N' to VBXE, show URL prompt, read URL from keyboard
+; Echo 'N', newline, then step the user through connection details.
 		lda	#'N'
 		sta	temp_char
 		jsr	process_char
 		jsr	CR_adr
 		jsr	LF_adr
-		lda	#<url_prompt
-		ldx	#>url_prompt
-		jsr	print_str
 
-; read URL into n_url_buf, echoing each character to VBXE
-		lda	#<n_url_buf
-		sta	src_ptr
-		lda	#>n_url_buf
-		sta	src_ptr+1
-		jsr	read_line_vbxe		; closes K: when done
-
-; if the user pressed Enter with no URL, copy the default
-		lda	n_url_buf
-		cmp	#$9B
-		bne	url_entered
-		ldy	#$FF
-copy_default	iny
-		lda	n_url_default,y
-		sta	n_url_buf,y
-		cmp	#$9B
-		bne	copy_default
-
-url_entered
-; parse unit number now — needed before nlogin (which precedes open)
-		ldy	#$01
-		lda	n_url_buf,y
-		cmp	#':'
-		bne	pre_digit
+; Always N: unit 1, device type N:
 		lda	#$01
-		bne	pre_store
-pre_digit	sec
-		sbc	#'0'
-pre_store	sta	n_unit
-
-		lda	#$01
+		sta	n_unit
 		sta	device_type
 
-; clear caps lock so Shift key produces lowercase during credential entry
-; (Atari convention: unshifted = uppercase, Shift+key = lowercase)
+; Clear caps lock (Atari: unshifted=uppercase, Shift=lowercase)
 		lda	#$00
 		sta	SHFLOK
 
-; prompt for username (for SSH auth; press Enter for none)
-		lda	#<login_prompt
-		ldx	#>login_prompt
+; --- PROTOCOL ---
+proto_again	lda	#<proto_prompt		; "PROTOCOL [T]CP [S]SH: "
+		ldx	#>proto_prompt
+		jsr	print_str
+		jsr	open_k_iocb2
+		ldx	#$20
+		lda	#$07			; GET_CHARS — one char
+		sta	ICCOM+$20
+		lda	#<temp_char
+		sta	ICBA+$20
+		lda	#>temp_char
+		sta	ICBA+$21
+		lda	#$01
+		sta	ICBL+$20
+		lda	#$00
+		sta	ICBL+$21
+		jsr	CIOV
+		ldx	#$20			; close K: IOCB 2
+		lda	#$0C
+		sta	ICCOM+$20
+		jsr	CIOV
+		lda	temp_char
+		and	#$DF			; force uppercase
+		cmp	#'T'
+		beq	proto_tcp
+		cmp	#'S'
+		beq	proto_ssh
+		jmp	proto_again		; invalid key, retry
+
+proto_tcp	lda	#'T'
+		jmp	proto_store
+proto_ssh	lda	#'S'
+proto_store	sta	proto_byte
+		sta	temp_char
+		jsr	process_char		; echo choice letter
+		jsr	CR_adr
+		jsr	LF_adr
+
+; --- SERVER ---
+		lda	#<server_prompt		; "SERVER: "
+		ldx	#>server_prompt
+		jsr	print_str
+		jsr	open_k_iocb2
+		lda	#<server_buf
+		sta	src_ptr
+		lda	#>server_buf
+		sta	src_ptr+1
+		jsr	read_line_vbxe
+		jsr	CR_adr
+		jsr	LF_adr
+
+; --- PORT ---
+		lda	#<port_prompt		; "PORT (Enter for default): "
+		ldx	#>port_prompt
+		jsr	print_str
+		jsr	open_k_iocb2
+		lda	#<port_buf
+		sta	src_ptr
+		lda	#>port_buf
+		sta	src_ptr+1
+		jsr	read_line_vbxe
+		jsr	CR_adr
+		jsr	LF_adr
+
+; --- USER ---
+		lda	#<user_prompt		; "USER: "
+		ldx	#>user_prompt
 		jsr	print_str
 		jsr	open_k_iocb2
 		lda	#<login_buf
@@ -666,19 +698,84 @@ pre_store	sta	n_unit
 		lda	#>login_buf
 		sta	src_ptr+1
 		jsr	read_line_vbxe
+		jsr	CR_adr
+		jsr	LF_adr
 
-; prompt for password
-		lda	#<password_prompt
-		ldx	#>password_prompt
+; --- PASSWORD ---
+		lda	#<pw_prompt		; "PASSWORD: "
+		ldx	#>pw_prompt
 		jsr	print_str
 		jsr	open_k_iocb2
 		lda	#<password_buf
 		sta	src_ptr
 		lda	#>password_buf
 		sta	src_ptr+1
-		jsr	read_line_vbxe
+		jsr	read_line_vbxe_pw	; echoes asterisks
+		jsr	CR_adr
+		jsr	LF_adr
 
-; pre-configure SSH credentials via $FD/$FE before open (matches netcat reference)
+; --- BUILD URL ---
+; Construct "N1:TCP://server:port" or "N1:SSH://server:port" in n_url_buf.
+		lda	#<n_url_buf
+		sta	dst_ptr
+		lda	#>n_url_buf
+		sta	dst_ptr+1
+
+		lda	#<n1_str		; "N1:"
+		sta	src_ptr
+		lda	#>n1_str
+		sta	src_ptr+1
+		jsr	copy_str
+
+		lda	proto_byte
+		cmp	#'T'
+		bne	url_ssh
+		lda	#<tcp_url_str		; "TCP://"
+		sta	src_ptr
+		lda	#>tcp_url_str
+		sta	src_ptr+1
+		jmp	url_proto_done
+url_ssh		lda	#<ssh_url_str		; "SSH://"
+		sta	src_ptr
+		lda	#>ssh_url_str
+		sta	src_ptr+1
+url_proto_done	jsr	copy_str
+
+		lda	#<server_buf		; hostname
+		sta	src_ptr
+		lda	#>server_buf
+		sta	src_ptr+1
+		jsr	copy_str
+
+		lda	#':'			; separator
+		jsr	put_byte_dst
+
+		lda	port_buf		; did user enter a port?
+		cmp	#$9B
+		bne	url_user_port
+		lda	proto_byte		; no — use default
+		cmp	#'T'
+		bne	url_ssh_default
+		lda	#<tcp_port_str		; "23"
+		sta	src_ptr
+		lda	#>tcp_port_str
+		sta	src_ptr+1
+		jmp	url_port_done
+url_ssh_default	lda	#<ssh_port_str		; "22"
+		sta	src_ptr
+		lda	#>ssh_port_str
+		sta	src_ptr+1
+		jmp	url_port_done
+url_user_port	lda	#<port_buf
+		sta	src_ptr
+		lda	#>port_buf
+		sta	src_ptr+1
+url_port_done	jsr	copy_str
+
+		lda	#$9B			; FujiNet URL terminator
+		jsr	put_byte_dst
+
+; pre-configure SSH credentials via $FD/$FE before open
 		jsr	nlogin_n_device
 
 		lda	#<connecting_msg
@@ -2105,7 +2202,11 @@ get_char	ldx	#$20
 do_bs		lda	counter
 		beq	get_char		; nothing to delete, ignore
 		dec	counter
-		jsr	BS_adr			; move cursor left on VBXE (Y corruption OK)
+		jsr	BS_adr			; move cursor left
+		lda	#' '
+		sta	temp_char
+		jsr	put_byte		; overwrite the character with a space
+		jsr	BS_adr			; move cursor left again
 		jmp	get_char
 
 done		ldy	counter
@@ -2116,6 +2217,88 @@ done		ldy	counter
 		sta	ICCOM+$20
 		jsr	CIOV
 		rts
+.endproc
+
+.proc read_line_vbxe_pw
+; Like read_line_vbxe but echoes '*' for each character (password masking).
+; On entry: src_ptr = destination buffer, K: open on IOCB 2.
+		lda	#$00
+		sta	counter
+pw_get		ldx	#$20
+		lda	#$07			; GET_CHARS
+		sta	ICCOM+$20
+		lda	#<temp_char
+		sta	ICBA+$20
+		lda	#>temp_char
+		sta	ICBA+$21
+		lda	#$01
+		sta	ICBL+$20
+		lda	#$00
+		sta	ICBL+$21
+		jsr	CIOV
+
+		lda	temp_char
+		cmp	#$9B			; Enter?
+		beq	pw_done
+		cmp	#$08			; Backspace?
+		beq	pw_bs
+
+		ldy	counter
+		sta	(src_ptr),y		; store actual char in buffer
+		inc	counter
+		beq	pw_done			; buffer full
+		lda	#'*'
+		sta	temp_char
+		jsr	put_byte		; echo '*'
+		jmp	pw_get
+
+pw_bs		lda	counter
+		beq	pw_get
+		dec	counter
+		jsr	BS_adr
+		lda	#' '
+		sta	temp_char
+		jsr	put_byte
+		jsr	BS_adr
+		jmp	pw_get
+
+pw_done		ldy	counter
+		lda	#$9B
+		sta	(src_ptr),y
+		ldx	#$20
+		lda	#$0C			; CMD_CLOSE K:
+		sta	ICCOM+$20
+		jsr	CIOV
+		rts
+.endproc
+
+; copy_str: copy $9B-terminated string from (src_ptr) to (dst_ptr), advance dst_ptr.
+; Does NOT copy the $9B. Trashes A, Y.
+.proc copy_str
+		ldy	#$00
+cs_loop		lda	(src_ptr),y
+		cmp	#$9B
+		beq	cs_done
+		sta	(dst_ptr),y
+		iny
+		jmp	cs_loop
+cs_done		tya
+		clc
+		adc	dst_ptr
+		sta	dst_ptr
+		bcc	cs_nc
+		inc	dst_ptr+1
+cs_nc		rts
+.endproc
+
+; put_byte_dst: write byte in A to (dst_ptr), advance dst_ptr. Trashes Y.
+.proc put_byte_dst
+		ldy	#$00
+		sta	(dst_ptr),y
+		inc	dst_ptr
+		bne	pb_nc
+		inc	dst_ptr+1
+pb_nc		rts
 .endproc
 
 .proc check_sendbuf				; checks to see if the send buffer is empty, and sends it if it's not.
@@ -2435,18 +2618,27 @@ ok		ldy	#$01			; positive Y = success
 		rts
 .endproc
 
-n_url_default	.byte	"N1:SSH://bbs.4wheelham.com:2222", $9B	; default URL
 send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
-url_prompt	.byte	"FujiNet URL (Enter=default): ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
 kbd_dev		.byte	"K:", $9B
 select_buf	.res	4, $00
 connecting_msg	.byte	"Connecting...", $9B
 n_open_ok_msg	.byte	"Connected.", $9B
-login_prompt	.byte	"Username (Enter=none): ", $9B
-password_prompt	.byte	"Password (Enter=none): ", $9B
+proto_prompt	.byte	"PROTOCOL [T]CP [S]SH: ", $9B
+server_prompt	.byte	"SERVER: ", $9B
+port_prompt	.byte	"PORT (Enter for default): ", $9B
+user_prompt	.byte	"USER: ", $9B
+pw_prompt	.byte	"PASSWORD: ", $9B
+n1_str		.byte	"N1:", $9B
+tcp_url_str	.byte	"TCP://", $9B
+ssh_url_str	.byte	"SSH://", $9B
+tcp_port_str	.byte	"23", $9B
+ssh_port_str	.byte	"22", $9B
+server_buf	.res	64, $00
+port_buf	.res	8, $00
+proto_byte	.res	1, $00
 n_old_vprced	.res	2, $00			; saved VPRCED vector
 n_old_pactl	.byte	$00			; saved PACTL state
 login_buf	.res	256, $00		; username buffer (256 bytes — FujiNet $FD expects 256)
