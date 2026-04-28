@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.04
+;	Version: v0.05
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -122,7 +122,43 @@ saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
 ;###################################################################################################################
 ; VBXE initialization
 ; check core version. needs to be fx core.
-start		lda	core_version
+start
+; --- warm-start detection ---
+; If our magic marker is present this is a RESET, not a cold boot.
+		lda	warm_start_flag
+		cmp	#$A5
+		bne	cold_start
+		lda	warm_start_flag+1
+		cmp	#$5A
+		bne	cold_start
+
+; RESET path: close any active N: connection before reinitializing.
+		lda	device_type
+		cmp	#$01
+		bne	warm_skip_close
+		jsr	nclose_n_device		; send CLOSE to FujiNet
+warm_skip_close
+		lda	#$00
+		sta	device_type		; clear device type
+		jmp	start_vbxe_check
+
+cold_start
+; First boot: save real DOSVEC, then hook it so RESET re-enters this app.
+		lda	DOSVEC
+		sta	real_dosvec
+		lda	DOSVEC+1
+		sta	real_dosvec+1
+		lda	#<start
+		sta	DOSVEC
+		lda	#>start
+		sta	DOSVEC+1
+		lda	#$A5
+		sta	warm_start_flag
+		lda	#$5A
+		sta	warm_start_flag+1
+
+start_vbxe_check
+		lda	core_version
 		cmp	#$10			; $10 means fx core in core_version
 		beq	core_fx
 
@@ -218,9 +254,9 @@ print_error					; prints the error message already set in ICBA
 		sta	ICCOM
 		jsr	CIOV
 
-; go back to DOS
+; go back to DOS (use real_dosvec — DOSVEC now points back to this app)
 
-		jmp	(DOSVEC)
+		jmp	(real_dosvec)
 
 
 no_vbxe_msg					; message to display for missing VBXE or non-fx core
@@ -549,7 +585,11 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 ; device selection: prompt the user to choose R: serial or N: FujiNet
 
 device_select
-; show selection prompt on VBXE display
+		lda	#<banner_msg
+		ldx	#>banner_msg
+		jsr	print_str
+		jsr	CR_adr
+		jsr	LF_adr
 		lda	#<select_prompt
 		ldx	#>select_prompt
 		jsr	print_str
@@ -2671,6 +2711,7 @@ ok		ldy	#$01			; positive Y = success
 .endproc
 
 send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
+banner_msg	.byte	"VBXETERM v0.05 (2026-04-27)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -2695,6 +2736,8 @@ proto_byte	.res	1, $00
 n_old_vprced	.res	2, $00			; saved VPRCED vector
 n_old_pactl	.byte	$00			; saved PACTL state
 old_vkeybd	.res	2, $00			; saved VKEYBD vector (OS keyboard IRQ)
+warm_start_flag	.res	2, $00			; $A5,$5A = app has run before (RESET vs cold boot)
+real_dosvec	.res	2, $00			; real DOS entry point saved at cold boot
 login_buf	.res	256, $00		; username buffer (256 bytes — FujiNet $FD expects 256)
 password_buf	.res	256, $00		; password buffer (256 bytes — FujiNet $FE expects 256)
 
@@ -3207,6 +3250,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.03.2026.04.14"
+version		.byte	"v0.05.2026.04.27"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

@@ -28,7 +28,7 @@ $(CA65_OBJ): $(CA65_SRC) $(CA65_DEPS)
 	$(CA65) $(CA65_SRC) -o $(CA65_OBJ)
 
 $(CA65_XEX): $(CA65_OBJ)
-	$(LD65) -C $(CA65_CFG) -S $(START_ADDR) -D start=$(START_ADDR) $(CA65_OBJ) -o $(CA65_XEX)
+	$(LD65) -C $(CA65_CFG) -S $(START_ADDR) -D start=$(START_ADDR) --mapfile $(PROJ_NAME)_ca65.map $(CA65_OBJ) -o $(CA65_XEX)
 
 ca65-disk: $(CA65_ATR)
 

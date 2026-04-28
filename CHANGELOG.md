@@ -7,6 +7,17 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.03] - 2026-04-22
+
+### Added
+- Startup device selection between Atari R: serial I/O and FujiNet N: URLs.
+- FujiNet N: open, status, read, and write handling based on the netcat-asm SIO path.
+
+### Changed
+- The startup flow now prompts for the FujiNet URL when N: is selected and keeps the existing R: path intact.
+
+---
+
 ## [0.02] - 2026-04-07
 
 ### Changed
