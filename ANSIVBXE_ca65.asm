@@ -548,6 +548,7 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 ;###################################################################################################################
 ; device selection: prompt the user to choose R: serial or N: FujiNet
 
+device_select
 ; show selection prompt on VBXE display
 		lda	#<select_prompt
 		ldx	#>select_prompt
@@ -818,8 +819,16 @@ wait_for_return
 		jmp	(DOSVEC)
 
 device_open
-; set up the KB interrupt handler now that device is open.
-		sei				; disable interrupts before we set the new vector
+; flush any keystrokes buffered during device selection
+		lda	#$00
+		sta	sendbufstart
+		sta	sendbufend
+; save old VKEYBD then install our keyboard handler
+		sei				; disable interrupts while changing vectors
+		lda	VKEYBD
+		sta	old_vkeybd
+		lda	VKEYBD+1
+		sta	old_vkeybd+1
 		lda	#<kbd_irq
 		sta	VKEYBD
 		lda	#>kbd_irq
@@ -863,6 +872,36 @@ r_do_recv	jsr	recv_from_device
 		sta	PACTL			; re-arm PROCEED interrupt
 		jmp	wait_for_byte
 
+handle_disconnect_n
+; Tear down the PROCEED interrupt, close N:, print message, restart device selection.
+		lda	PACTL
+		and	#$FE
+		sta	PACTL			; disable PROCEED IRQ
+		lda	n_old_vprced
+		sta	VPRCED
+		lda	n_old_vprced+1
+		sta	VPRCED+1		; restore old VPRCED vector
+		lda	PACTL
+		and	#$FE
+		ora	n_old_pactl
+		sta	PACTL			; restore old IRQ enable state
+		jsr	nclose_n_device		; send CLOSE to FujiNet
+; restore the OS keyboard IRQ so K: CIO reads work at device selection
+		sei
+		lda	old_vkeybd
+		sta	VKEYBD
+		lda	old_vkeybd+1
+		sta	VKEYBD+1
+		cli
+		lda	#$00
+		sta	device_type		; back to no device selected
+		lda	#<disconnected_msg
+		ldx	#>disconnected_msg
+		jsr	print_str
+		jsr	CR_adr
+		jsr	LF_adr
+		jmp	device_select
+
 .proc recv_from_device
 		lda	device_type
 		bne	n_recv
@@ -905,6 +944,13 @@ n_recv		lda	#FUJI_ID
 		sta	DAUX1			; DAUX must be 0 for STATUS (not the byte count)
 		sta	DAUX2
 		jsr	SIOV
+		bpl	n_recv_status_ok	; positive result → no SIO error
+		jmp	n_recv_disconnect	; SIO error (timeout/NAK) → disconnected
+n_recv_status_ok
+		lda	DVSTAT2			; connection flag (C field): 0 = not connected
+		bne	n_recv_dvstat_ok	; non-zero = still connected, proceed
+		jmp	n_recv_disconnect	; C=0 → disconnected
+n_recv_dvstat_ok
 		lda	DVSTAT0			; bytes waiting (lo + hi)
 		ora	DVSTAT1
 		bne	n_recv_read
@@ -986,6 +1032,12 @@ next_byte	lda	recv_buffer, y		; get character from buffer
 		cpy	recvbuflen
 		bne	next_byte
 done		rts
+
+n_recv_disconnect
+; Pop the jsr recv_from_device return address, then jump to disconnect handler.
+		pla
+		pla
+		jmp	handle_disconnect_n
 .endproc
 
 .proc process_char
@@ -2626,6 +2678,7 @@ kbd_dev		.byte	"K:", $9B
 select_buf	.res	4, $00
 connecting_msg	.byte	"Connecting...", $9B
 n_open_ok_msg	.byte	"Connected.", $9B
+disconnected_msg	.byte	"Disconnected.", $9B
 proto_prompt	.byte	"PROTOCOL [T]CP [S]SH: ", $9B
 server_prompt	.byte	"SERVER: ", $9B
 port_prompt	.byte	"PORT (Enter for default): ", $9B
@@ -2641,6 +2694,7 @@ port_buf	.res	8, $00
 proto_byte	.res	1, $00
 n_old_vprced	.res	2, $00			; saved VPRCED vector
 n_old_pactl	.byte	$00			; saved PACTL state
+old_vkeybd	.res	2, $00			; saved VKEYBD vector (OS keyboard IRQ)
 login_buf	.res	256, $00		; username buffer (256 bytes — FujiNet $FD expects 256)
 password_buf	.res	256, $00		; password buffer (256 bytes — FujiNet $FE expects 256)
 
