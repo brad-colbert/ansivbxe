@@ -2189,7 +2189,7 @@ get_char	ldx	#$20
 		lda	temp_char
 		cmp	#$9B			; Enter?
 		beq	done
-		cmp	#$08			; Backspace?
+		cmp	#$7E			; Delete Back (Atari backspace key)
 		beq	do_bs
 
 		ldy	counter
@@ -2240,7 +2240,7 @@ pw_get		ldx	#$20
 		lda	temp_char
 		cmp	#$9B			; Enter?
 		beq	pw_done
-		cmp	#$08			; Backspace?
+		cmp	#$7E			; Delete Back (Atari backspace key)
 		beq	pw_bs
 
 		ldy	counter
