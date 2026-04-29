@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert
 **Original MADS by:** Joseph Zatarski
-**Version:** v0.05
+**Version:** v0.06
 
 ---
 
@@ -29,8 +29,8 @@ Selecting `N` at the device prompt steps through:
 1. **PROTOCOL** — press `T` for Telnet or `S` for SSH
 2. **SERVER** — hostname or IP address
 3. **PORT** — port number; press Return for the default (23 for Telnet, 22 for SSH)
-4. **USER** — username; press Return if none
-5. **PASSWORD** — password (displayed as `*`); press Return if none
+4. **USER** — username (SSH only)
+5. **PASSWORD** — password (SSH only, displayed as `*`)
 
 The FujiNet URL is constructed automatically. Backspace works at every field.
 
@@ -169,7 +169,7 @@ The code is ORG'd at `$2800`.
 2. Boot the disk. The application starts automatically.
 3. The banner shows the application name and version, followed by the device prompt.
 4. Press `R` for serial (R: device) or `N` for FujiNet.
-5. For FujiNet, follow the connection wizard (protocol → server → port → user → password).
+5. For FujiNet, follow the connection wizard (protocol → server → port; SSH also prompts for user → password).
 6. To exit a session, log out from the remote host — the application detects the disconnect and returns to the device selection prompt.
 7. Pressing **RESET** drops any active connection, reinitializes the display, and returns to the device selection prompt.
 
@@ -194,6 +194,9 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.06 — 2026-04-28
+- Telnet connection wizard no longer prompts for USER or PASSWORD — credentials are SSH-only
 
 ### v0.05 — 2026-04-27
 - Renamed application to **VBXETERM**
