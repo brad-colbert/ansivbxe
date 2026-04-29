@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.06
+;	Version: v0.07
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -175,6 +175,11 @@ start_vbxe_check
 core_fx						; for FX core compatible versions (1.2x, 1.26, 1.40, etc)
 						; we'll accept the FX core and proceed without strict version checking
 
+; Do NOT write video_control=$00 here. On a power-up it is already $00 (VBXE
+; hardware reset). On a SDX autorun reload (RESET), it is $05 from the previous
+; session — VBXE stays live showing old content. Either way, writing $00 causes
+; VBXE FX to output a solid red screen for the duration of file loading.
+
 		lda	SDMCTL			; save current DMA control before VBXE takes over
 		sta	saved_sdmctl
 		lda	#$20			; shut off ANTIC DMA except instruction fetch
@@ -184,52 +189,38 @@ core_fx						; for FX core compatible versions (1.2x, 1.26, 1.40, etc)
 		lda	#$00
 		sta 	memac_b_control		; disable memac b window
 
-; vbxe_mem_base is the high address of what we want to use for our VBXE memory window
-; the first 4 bits of memac_control are the high nibble of the base address of the window
-; bits 0-1: window size (00=4K, 01=8K, 10=16K, 11=32K)
-; bit 2: MAE - ANTIC access enable
-; bit 3: MCE - CPU access enable
 ; Keep a 4K window at A000-AFFF to avoid mapping into cartridge/ROM space.
-
-		lda	#(>vbxe_mem_base)|$8	; $08 = 1000b: 4K window (bits 0-1 = 00) + CPU access (bit 3 = 1)
+		lda	#(>vbxe_mem_base)|$8	; 4K window, CPU access enabled
 		sta	memac_control
 
-; we are going to put a blitter list which clears the VBXE RAM into the first page of memory
-; so we set the bank
-
+; Open MEMAC window to bank 0 (VBXE $0000-$0FFF) for font and XDL loading.
 		lda	#$80
 		sta	memac_bank_sel
 
-
-
-.scope						; copy the screen clearing blitter
-		ldx	#00
-loop		lda	clear_ram_bcb,x
-		sta	vbxe_mem_base,x
-		inx
-		cpx	#(clear_ram_end - clear_ram_bcb)
-		bne	loop
-.endscope
-
-; start the BCB
-
-		lda	#0
-		sta	blt_adr
-		sta	blt_adr + 1
-		sta	blt_adr + 2
-		lda	#1
-		sta	blt_start
-
-.scope						; wait until the blitter is done
-loop		lda	blt_busy
-		bne	loop
-.endscope
-
-; turn off the MEMAC_A window so that it doesn't conflict with the extended RAM window
-; this was causing issues with SDX
-		
-		lda	#0
-		sta	memac_bank_sel
+; On a hardware RESET the VBXE core can come up showing its default red field
+; until a valid XDL is installed. Load a tiny "blank" XDL immediately so the
+; transition during file loading stays transparent instead of red.
+		lda	#<blank_xdl
+		sta	src_ptr
+		lda	#>blank_xdl
+		sta	src_ptr+1
+		lda	#<(vbxe_mem_base+$0800)
+		sta	dst_ptr
+		lda	#>(vbxe_mem_base+$0800)
+		sta	dst_ptr+1
+		lda	#<(blank_xdl_end - blank_xdl - 1)
+		sta	counter
+		lda	#>(blank_xdl_end - blank_xdl)
+		sta	counter+1
+		jsr	mem_move
+		lda	#$00
+		sta	xdl_adr
+		lda	#$08
+		sta	xdl_adr_mid
+		lda	#$00
+		sta	xdl_adr_high
+		lda	#$01			; XDL enabled, transparent output
+		sta	video_control
 
 ; done with VBXE init - jump to main program
 		jmp	load_files
@@ -510,6 +501,23 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 		lda	#$FF
 		sta	memac_bank_sel
 
+; Clear screen buffer: VBXE $07F100-$07FFFF = CPU $A100-$AFFF = 3840 bytes.
+; Replaces the full blitter clear. On power-up VBXE RAM is uninit; on SDX
+; autorun reload it holds the previous session's screen. Either way we zero it
+; here so device_select starts with a blank display.
+		lda	#$00
+		sta	dst_ptr
+		lda	#$A1
+		sta	dst_ptr+1		; dst_ptr → $A100 (= VBXE $7F100 via MEMAC $FF)
+		ldx	#15			; 15 pages × 256 = 3840 bytes
+@pg		ldy	#$00
+@by		sta	(dst_ptr),y
+		iny
+		bne	@by
+		inc	dst_ptr+1
+		dex
+		bne	@pg
+
 ; done initializing the VBXE
 ;###################################################################################################################
 ; now we start initializing the variables for the terminal state
@@ -582,6 +590,82 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 ;		sta	starttime + 2
 
 ;###################################################################################################################
+; warm_reinit — fast RESET recovery without file loading.
+; VBXE is already running (video_control=$05), font is in VBXE $0000,
+; palette registers are intact. We only need to:
+;   1. Re-assert SDMCTL=$20 (OS warm-start may have re-enabled ANTIC)
+;   2. Reload XDL+BCBs from the code image into VBXE $0800
+;   3. Clear the screen buffer (VBXE $07F100, 3840 bytes) via CPU writes
+;   4. Switch MEMAC to screen buffer window and fall into device_select
+; This avoids setting video_control=$00, which causes a red flash on VBXE FX.
+
+warm_reinit
+		lda	#$20
+		sta	SDMCTL				; re-assert ANTIC off (OS may have re-enabled it)
+
+; Re-open MEMAC window to bank 0 (VBXE $0000-$0FFF at $A000-$AFFF)
+		lda	#(>vbxe_mem_base)|$8
+		sta	memac_control
+		lda	#$80
+		sta	memac_bank_sel
+
+; Reload XDL + BCBs from code image into VBXE $0800
+		lda	#<xdl
+		sta	src_ptr
+		lda	#>xdl
+		sta	src_ptr+1
+		lda	#<(vbxe_mem_base+$0800)
+		sta	dst_ptr
+		lda	#>(vbxe_mem_base+$0800)
+		sta	dst_ptr+1
+		lda	#<(bcb_end - xdl - 1)
+		sta	counter
+		lda	#>(bcb_end - xdl)
+		sta	counter+1
+		jsr	mem_move
+
+; Re-assert xdl_adr (restore_graphics may have left it pointing elsewhere)
+		lda	#$00
+		sta	xdl_adr
+		lda	#$08
+		sta	xdl_adr_mid
+		lda	#$00
+		sta	xdl_adr_high
+
+; Re-assert video_control (XDL enabled, no_trans=1)
+		lda	#$05
+		sta	video_control
+
+; Switch MEMAC to screen buffer (VBXE $07F000-$07FFFF at $A000-$AFFF)
+		lda	#$FF
+		sta	memac_bank_sel
+
+; Re-initialize terminal display variables — same sequence as cold-start load_files.
+; This is required because warm_reinit skips load_files. Crucially, scroll_page fills
+; every color byte with text_color ($87), setting bit 7 (overlay-active). Without this
+; the color bytes are all $00 (overlay inactive) and the VBXE text overlay is fully
+; transparent, letting GTIA's background color (often reddish after OS warm start) show
+; through — causing the "red screen on RESET" symptom.
+		lda	#<vbxe_screen_top
+		sta	cursor_address
+		lda	#>vbxe_screen_top
+		sta	cursor_address + 1
+		lda	#$87			; white on black, overlay active
+		sta	text_color
+		lda	#$00
+		sta	row
+		sta	column
+		sta	ctrl_seq_flg
+		sta	cursor_flg		; cursor not yet visible
+		sta	sendbufstart
+		sta	sendbufend
+		sta	recvbuflen
+		lda	#$01
+		sta	lf_mode
+		jsr	scroll_page		; fill screen with text_color (overlay active, black bg)
+		jsr	cursor_on		; draw cursor at home position
+
+;###################################################################################################################
 ; device selection: prompt the user to choose R: serial or N: FujiNet
 
 device_select
@@ -633,6 +717,10 @@ device_select
 		beq	choose_n
 		cmp	#'n'
 		beq	choose_n
+		cmp	#'Q'
+		beq	choose_quit
+		cmp	#'q'
+		beq	choose_quit
 
 choose_r
 ; echo 'R' to VBXE, close K:, open R: serial device
@@ -647,6 +735,15 @@ choose_r
 		jsr	CIOV
 		jsr	open_r_device
 		jmp	device_open
+
+choose_quit
+; Close K: on IOCB 2, clean up VBXE, and exit to DOS.
+		ldx	#$20
+		lda	#$0C			; CMD_CLOSE K:
+		sta	ICCOM+$20
+		jsr	CIOV
+		jsr	restore_graphics
+		jmp	(real_dosvec)
 
 choose_n
 ; Echo 'N', newline, then step the user through connection details.
@@ -2701,28 +2798,38 @@ ok		ldy	#$01			; positive Y = success
 
 .proc restore_graphics
 ; Make VBXE overlay invisible, then restore SDMCTL for normal ANTIC display.
-; Strategy: change the XDL's first OVOFF+RPTL entry to cover ALL 216 scanlines,
-; then keep XDL *enabled* (video_control=$01) so VBXE processes the OVOFF entry
-; each frame and outputs nothing. Setting video_control=$00 kills XDL processing
-; before the OVOFF takes effect, leaving VBXE frozen on the last rendered frame.
-; XDL lives at VBXE $0800; the RPTL count byte is at $0802 → CPU $A802 (bank 0).
+; Strategy: modify the XDL's first OVOFF+RPTL entry to cover ALL 216 scanlines
+; AND set XDL_END in its ATT byte so VBXE never reaches the second (text) entry.
+; Then wait for VBL so the change takes effect before we restore SDMCTL.
+; XDL lives at VBXE $0800:
+;   $0800 = command byte (OVOFF+MAPOFF+RPTL)
+;   $0801 = ATT byte — bit 0 = XDL_END
+;   $0802 = RPTL count (lines - 1)
 		lda	#$80
 		sta	memac_bank_sel			; bank 0: VBXE $0000-$0FFF at $A000-$AFFF
+		lda	vbxe_mem_base + $801
+		ora	#$01				; set XDL_END so VBXE stops after this entry
+		sta	vbxe_mem_base + $801
 		lda	#216-1				; OVOFF for all visible scanlines
-		sta	vbxe_mem_base + $802		; XDL line-count byte at VBXE $0802
+		sta	vbxe_mem_base + $802		; RPTL count byte
 		lda	#$01				; XDL enabled, color 0 transparent (no_trans=0)
-		sta	video_control			; VBXE now renders nothing — GTIA shows through
+		sta	video_control
 		lda	#$00
 		sta	memac_bank_sel			; close MEMAC window
 		sta	memac_control			; disable MEMAC A CPU access
+; wait for VBL so the modified XDL takes effect before restoring ANTIC DMA
+@wait1	lda	VCOUNT
+		bne	@wait1				; wait until VCOUNT reaches 0 (top of frame)
+@wait2	lda	VCOUNT
+		beq	@wait2				; wait until VCOUNT leaves 0 (VBL passed)
 		lda	saved_sdmctl			; restore original ANTIC DMA control
 		sta	SDMCTL
 		rts
 .endproc
 
 send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
-banner_msg	.byte	"VBXETERM v0.06 (2026-04-28)", $9B
-select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
+banner_msg	.byte	"VBXETERM v0.07 (2026-04-29)", $9B
+select_prompt	.byte	"R=Serial  N=FujiNet  Q=Quit? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
 kbd_dev		.byte	"K:", $9B
@@ -2754,6 +2861,14 @@ password_buf	.res	256, $00		; password buffer (256 bytes — FujiNet $FE expects
 ;temp_char	.byte	$00			; temporary location for storing a character
 
 xdl						; start of xdl
+
+blank_xdl					; temporary startup XDL: overlay off for all visible lines
+		.byte	%00110100		; OVOFF, MAPOFF, RPTL
+		.byte	%00001001		; ATT + XDL_END
+		.byte	216-1			; hide all visible scanlines
+		.byte	%00000001		; palette 0, ANTIC normal mode
+		.byte	%11111111		; overlay priority (ignored with OVOFF)
+blank_xdl_end
 
 ; displays 24 scanlines of no overlay (ANTIC display list should be displaying blank
 ; lines of GTIA background color)
@@ -3260,6 +3375,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.06.2026.04.28"
+version		.byte	"v0.07.2026.04.29"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
