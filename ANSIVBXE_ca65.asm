@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.05
+;	Version: v0.06
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -729,6 +729,11 @@ proto_store	sta	proto_byte
 		jsr	CR_adr
 		jsr	LF_adr
 
+; Skip credentials for TCP (telnet) — only SSH needs them
+		lda	proto_byte
+		cmp	#'T'
+		beq	build_url
+
 ; --- USER ---
 		lda	#<user_prompt		; "USER: "
 		ldx	#>user_prompt
@@ -756,6 +761,7 @@ proto_store	sta	proto_byte
 		jsr	LF_adr
 
 ; --- BUILD URL ---
+build_url
 ; Construct "N1:TCP://server:port" or "N1:SSH://server:port" in n_url_buf.
 		lda	#<n_url_buf
 		sta	dst_ptr
@@ -816,8 +822,12 @@ url_port_done	jsr	copy_str
 		lda	#$9B			; FujiNet URL terminator
 		jsr	put_byte_dst
 
-; pre-configure SSH credentials via $FD/$FE before open
+; pre-configure SSH credentials via $FD/$FE before open (SSH only)
+		lda	proto_byte
+		cmp	#'S'
+		bne	skip_nlogin
 		jsr	nlogin_n_device
+skip_nlogin
 
 		lda	#<connecting_msg
 		ldx	#>connecting_msg
@@ -2711,7 +2721,7 @@ ok		ldy	#$01			; positive Y = success
 .endproc
 
 send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
-banner_msg	.byte	"VBXETERM v0.05 (2026-04-27)", $9B
+banner_msg	.byte	"VBXETERM v0.06 (2026-04-28)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -3250,6 +3260,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.05.2026.04.27"
+version		.byte	"v0.06.2026.04.28"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
