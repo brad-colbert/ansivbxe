@@ -6,6 +6,8 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 **Original MADS by:** Joseph Zatarski
 **Version:** v0.09
 
+<img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
+
 ---
 
 ## Features
