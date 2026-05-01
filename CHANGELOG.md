@@ -7,6 +7,13 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.09] - 2026-05-01
+
+### Added
+- Colorized `VBXE` letters in the startup banner using ANSI SGR sequences (Red, Green, Blue, Yellow), then reset attributes for the remainder of the banner text.
+
+---
+
 ## [0.08] - 2026-05-01
 
 ### Fixed

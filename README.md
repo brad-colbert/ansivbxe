@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert
 **Original MADS by:** Joseph Zatarski
-**Version:** v0.08
+**Version:** v0.09
 
 ---
 
@@ -194,6 +194,9 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.09 — 2026-05-01
+- Colorized the `VBXE` letters in the startup banner using ANSI SGR sequences (Red, Green, Blue, Yellow)
 
 ### v0.08 — 2026-05-01
 - On a failed FujiNet connection, pressing Return now returns to the device selection prompt (clears screen) instead of quitting
