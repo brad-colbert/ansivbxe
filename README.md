@@ -2,9 +2,9 @@
 
 An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences and a 256-character IBM PC font, using the VBXE (Video Board XE) graphics expansion. Renders ANSI art and connects to BBS systems and SSH hosts over serial (R:) or FujiNet (N:).
 
-**Converted to CA65 and updated by:** Brad Colbert
-**Original MADS by:** Joseph Zatarski
-**Version:** v0.09
+**Converted to CA65 and updated by:** Brad Colbert  
+**Original MADS by:** Joseph Zatarski  
+**Version:** v0.09  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
