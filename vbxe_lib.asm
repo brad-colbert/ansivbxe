@@ -390,9 +390,9 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 ;
 ;  void __fastcall__ vbxe_shutdown (void)
 ;
-;  Make the VBXE overlay invisible by patching the XDL's first OVOFF
-;  entry to cover all 216 visible scanlines, then disable the MEMAC
-;  window and restore SDMCTL to the value saved by _vbxe_init.
+;  Force the XDL into a full-screen OVOFF state for one VBLANK so any
+;  active overlay stops blending with ANTIC, then fully idle the VBXE
+;  core, close MEMAC windows and restore SDMCTL to the startup value.
 ;
 ;  Assumes _vbxe_load_files was called and that the XDL was loaded to
 ;  VBXE $0800 with the OVOFF scanline count at VBXE $0802.
@@ -401,22 +401,55 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 
 .proc _vbxe_shutdown
 
-		; Open bank 0 so we can patch the XDL at VBXE $0802 (CPU $A802)
+		; Open bank 0 so we can patch the XDL at VBXE $0800 (CPU $A800).
 		lda	#$80
 		sta	memac_bank_sel
 
+		; Force a known-good full-screen OVOFF block at the head of the XDL.
+		lda	#%00110100		; OVOFF + MAPOFF + RPTL
+		sta	vbxe_mem_base + $0800
+		lda	#%00001000		; ATT (match runtime XDL setup)
+		sta	vbxe_mem_base + $0801
 		lda	#216-1
-		sta	vbxe_mem_base + $802	; patch OVOFF line count — covers full display
+		sta	vbxe_mem_base + $0802	; extend first OVOFF entry across the full display
+		lda	#%00000001		; palette/flags byte for OVOFF block
+		sta	vbxe_mem_base + $0803
 
-		lda	#$01			; XDL enabled, no_trans clear — OVOFF hides everything
+		lda	#$05			; keep XDL active while color-0 is opaque (runtime mode)
 		sta	video_control
 
-		; Disable MEMAC A window
-		lda	#$00
-		sta	memac_bank_sel		; clear enable bit
-		sta	memac_control		; clear MCE (CPU access disabled)
+		; Give the renderer two full frames to latch the OVOFF state.
+		ldx	#2
+@frame
+		lda	RTCLOK+2
+@wait_vbl
+		cmp	RTCLOK+2
+		beq	@wait_vbl
+		dex
+		bne	@frame
 
-		; Restore ANTIC DMA
+		; Force VBXE fully idle: stop XDL path, clear XDL address,
+		; disable blitter IRQ, and disable both MEMAC windows.
+		lda	#$00
+		sta	video_control
+		sta	xdl_adr
+		sta	xdl_adr_mid
+		sta	xdl_adr_high
+		sta	blt_adr
+		sta	blt_adr+1
+		sta	blt_adr+2
+		sta	blt_start
+		sta	irq_control
+		sta	colmask
+		sta	P0
+		sta	P1
+		sta	P2
+		sta	P3
+		sta	memac_b_control
+		sta	memac_bank_sel
+		sta	memac_control
+		sta	colclr
+
 		lda	saved_sdmctl
 		sta	SDMCTL
 

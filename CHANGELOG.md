@@ -7,6 +7,18 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.08] - 2026-05-01
+
+### Fixed
+- On a failed FujiNet connection, pressing Return now returns to the device selection prompt instead of quitting to DOS.
+- Device selection screen clears the display and homes the cursor before printing the banner.
+- Fixed bug where selecting R: serial after a failed N: FujiNet attempt caused key presses to be ignored (`device_type` was not reset to 0).
+
+### Changed
+- Q=Quit option removed from device selection prompt.
+
+---
+
 ## [0.03] - 2026-04-22
 
 ### Added

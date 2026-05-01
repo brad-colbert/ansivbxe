@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert
 **Original MADS by:** Joseph Zatarski
-**Version:** v0.06
+**Version:** v0.08
 
 ---
 
@@ -194,6 +194,16 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.08 — 2026-05-01
+- On a failed FujiNet connection, pressing Return now returns to the device selection prompt (clears screen) instead of quitting
+- Device selection screen now clears the display and homes the cursor before printing the banner, so it always appears at the top
+- Q=Quit option removed from device selection prompt
+- Fixed bug where selecting R: serial after a failed N: FujiNet attempt caused key presses to be ignored (device_type was left set to N:)
+
+### v0.07 — 2026-04-29
+- Restore OS keyboard IRQ (VKEYBD) before returning to device selection after disconnect, so CIO K: reads work correctly
+- Restore VBXE/ANTIC state cleanly on exit to DOS
 
 ### v0.06 — 2026-04-28
 - Telnet connection wizard no longer prompts for USER or PASSWORD — credentials are SSH-only

@@ -27,6 +27,7 @@ DVSTAT3		=	$2ED
 CIOV		=	$E456			; address for CIO
 SIOV		=	$E459			; address for SIO
 DOSVEC		=	$A			; vector for DOS
+WARMSV		=	$E474			; OS warmstart entry (RESET path)
 
 ; SIO parameter block
 DDEVIC		=	$300			; device ID

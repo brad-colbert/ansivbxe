@@ -185,8 +185,7 @@ print_error					; prints the error message already set in ICBA
 		jsr	CIOV
 
 ; go back to DOS
-
-		jmp	(DOSVEC)
+		jmp	exit_to_dos
 
 
 no_vbxe_msg					; message to display for missing VBXE or non-fx core
@@ -234,6 +233,18 @@ init_terminal_state
 ; device type: 0 = R:, 1 = N:
 		sta	device_type
 
+; Save OS vectors/PACTL once so exit_to_dos can always restore cleanly.
+		lda	VKEYBD
+		sta	old_vkeybd
+		lda	VKEYBD+1
+		sta	old_vkeybd+1
+		lda	VPRCED
+		sta	n_old_vprced
+		lda	VPRCED+1
+		sta	n_old_vprced+1
+		lda	PACTL
+		sta	n_old_pactl
+
 ; LF-as-CRLF mode: default on (most hosts send bare LF expecting terminal to add CR)
 		lda	#$01
 		sta	lf_mode
@@ -276,6 +287,11 @@ init_terminal_state
 ; device selection: prompt the user to choose R: serial or N: FujiNet
 
 device_select
+		jsr	scroll_page		; clear screen
+		lda	#$00			; move cursor to top-left
+		sta	row
+		sta	column
+		jsr	recalc_cursor
 		lda	#<banner_msg
 		ldx	#>banner_msg
 		jsr	print_str
@@ -324,13 +340,15 @@ device_select
 		beq	choose_n
 		cmp	#'n'
 		beq	choose_n
-		cmp	#'Q'
-		beq	choose_quit
-		cmp	#'q'
-		beq	choose_quit
+;		cmp	#'Q'
+;		beq	choose_quit
+;		cmp	#'q'
+;		beq	choose_quit
 
 choose_r
 ; echo 'R' to VBXE, close K:, open R: serial device
+		lda	#$00
+		sta	device_type		; R: = 0 (clear in case we're retrying after a failed N: attempt)
 		lda	#'R'
 		sta	temp_char
 		jsr	process_char
@@ -343,14 +361,13 @@ choose_r
 		jsr	open_r_device
 		jmp	device_open
 
-choose_quit
-; Close K: on IOCB 2, clean up VBXE, and exit to DOS.
-		ldx	#$20
-		lda	#$0C			; CMD_CLOSE K:
-		sta	ICCOM+$20
-		jsr	CIOV
-		jsr	restore_graphics
-		jmp	(DOSVEC)
+;choose_quit
+;; Close K: on IOCB 2, clean up VBXE, and exit to DOS.
+;		ldx	#$20
+;		lda	#$0C			; CMD_CLOSE K:
+;		sta	ICCOM+$20
+;		jsr	CIOV
+;		jmp	exit_to_dos
 
 choose_n
 ; Echo 'N', newline, then step the user through connection details.
@@ -569,8 +586,7 @@ wait_for_return
 		lda	#$00
 		sta	ICBL+1
 		jsr	CIOV
-		jsr	restore_graphics
-		jmp	(DOSVEC)
+		jmp	device_select
 
 device_open
 ; flush any keystrokes buffered during device selection
@@ -2403,17 +2419,115 @@ ok		ldy	#$01			; positive Y = success
 		rti
 .endproc
 
-.proc restore_graphics
-		jsr	_vbxe_shutdown
+.proc restore_os_hooks
+; Restore IRQ/vector state that may have been modified while terminal was active.
+		lda	PACTL
+		and	#$FE
+		sta	PACTL			; disable PROCEED IRQ before touching VPRCED
+
+		lda	n_old_vprced
+		sta	VPRCED
+		lda	n_old_vprced+1
+		sta	VPRCED+1
+
+		lda	n_old_pactl
+		and	#$FE
+		sta	PACTL			; restore PACTL state but keep PROCEED IRQ disabled
+
+		sei
+		lda	old_vkeybd
+		sta	VKEYBD
+		lda	old_vkeybd+1
+		sta	VKEYBD+1
+		cli
+
+		ldx	#$10
+		lda	#$0C			; close IOCB 1 (R:/N:) if open
+		sta	ICCOM+$10
+		jsr	CIOV
 		rts
 .endproc
 
+.proc restore_graphics
+		lda	#$00
+		sta	SDMCTL				; blank ANTIC immediately during teardown
+		sta	$D400				; keep shadow/hardware DMACTL in sync
+
+		jsr	_vbxe_shutdown
+
+		; _vbxe_shutdown already restored SDMCTL from startup state.
+		; Mirror that restored shadow value to hardware DMACTL immediately.
+		lda	SDMCTL
+		sta	$D400
+
+		lda	#$00
+		sta	$D01B				; PRIOR (hardware): normal GTIA priority mode
+		sta	$026F				; GPRIOR shadow
+
+		lda	#$C0
+		sta	$D40E				; NMIEN: enable VBI + DLI (OS default-compatible)
+
+		lda	#$00
+
+		sta	$D016				; COLPF0
+		sta	$D017				; COLPF1
+		sta	$D018				; COLPF2
+		sta	$D019				; COLPF3
+		sta	$D01A				; COLBK
+		sta	$02C4				; COLOR0 shadow
+		sta	$02C5				; COLOR1 shadow
+		sta	$02C6				; COLOR2 shadow
+		sta	$02C7				; COLOR3 shadow
+		sta	$02C8				; COLOR4 shadow
+
+		; Re-open IOCB 0 to E: in text mode so DOS resumes on a clean console.
+		ldx	#$00
+		lda	#$0C
+		sta	ICCOM
+		jsr	CIOV
+
+		; Force a fresh OS text display list and palette via screen handler.
+		lda	#$03
+		sta	ICCOM
+		lda	#<s_device
+		sta	ICBA
+		lda	#>s_device
+		sta	ICBA+1
+		lda	#$00				; graphics mode 0
+		sta	ICAX1
+		sta	ICAX2
+		jsr	CIOV
+
+		lda	#$0C
+		sta	ICCOM
+		jsr	CIOV
+
+		lda	#$03
+		sta	ICCOM
+		lda	#<e_device
+		sta	ICBA
+		lda	#>e_device
+		sta	ICBA+1
+		lda	#$00
+		sta	ICAX1
+		sta	ICAX2
+		jsr	CIOV
+		rts
+.endproc
+
+exit_to_dos
+		jsr	restore_os_hooks
+		jsr	restore_graphics
+		jmp	(DOSVEC)		; return directly to DOS command processor
+
 send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
-banner_msg	.byte	"VBXETERM v0.07 (2026-04-29)", $9B
-select_prompt	.byte	"R=Serial  N=FujiNet  Q=Quit? ", $9B
+banner_msg	.byte	"VBXETERM v0.08 (2026-05-01)", $9B
+select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
 kbd_dev		.byte	"K:", $9B
+s_device	.byte	"S:", $9B
+e_device	.byte	"E:", $9B
 select_buf	.res	4, $00
 connecting_msg	.byte	"Connecting...", $9B
 n_open_ok_msg	.byte	"Connected.", $9B
