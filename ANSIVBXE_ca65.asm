@@ -2404,24 +2404,7 @@ ok		ldy	#$01			; positive Y = success
 .endproc
 
 .proc restore_graphics
-; Make VBXE overlay invisible, then restore SDMCTL for normal ANTIC display.
-
-; Strategy: change the XDL's first OVOFF+RPTL entry to cover ALL 216 scanlines,
-; then keep XDL enabled (video_control=$01) so VBXE processes the OVOFF entry
-; each frame and outputs nothing. Setting video_control=$00 kills XDL processing
-; before the OVOFF takes effect, leaving VBXE frozen on the last rendered frame.
-
-		lda	#$80
-		sta	memac_bank_sel			; bank 0: VBXE $0000-$0FFF at $A000-$AFFF
-		lda	#216-1				; OVOFF for all visible scanlines
-		sta	vbxe_mem_base + $802		; XDL line-count byte at VBXE $0802
-		lda	#$01				; XDL enabled, color 0 transparent (no_trans=0)
-		sta	video_control
-		lda	#$00
-		sta	memac_bank_sel			; close MEMAC window
-		sta	memac_control			; disable MEMAC A CPU access
-		lda	saved_sdmctl			; restore original ANTIC DMA control
-		sta	SDMCTL
+		jsr	_vbxe_shutdown
 		rts
 .endproc
 
