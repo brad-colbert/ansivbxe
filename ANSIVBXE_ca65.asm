@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.06
+;	Version: v0.07
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -52,6 +52,8 @@
 	.include "atarios_ca65.inc"		; atari OS equates,
 	.include "atarihardware_ca65.inc"	; general atari hardware equates,
 	.include "VBXE_ca65.inc"		; and VBXE equates
+
+	.import	_vbxe_init, _vbxe_load_files, _vbxe_shutdown
 
 ; VBXE equates
 vbxe_mem_base	= $A000				; If I put it here, it should be OK and it won't conflict with the extended RAM.
@@ -123,116 +125,44 @@ saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
 ; VBXE initialization
 ; check core version. needs to be fx core.
 start
-; --- warm-start detection ---
-; If our magic marker is present this is a RESET, not a cold boot.
-		lda	warm_start_flag
-		cmp	#$A5
-		bne	cold_start
-		lda	warm_start_flag+1
-		cmp	#$5A
-		bne	cold_start
-
-; RESET path: close any active N: connection before reinitializing.
-		lda	device_type
-		cmp	#$01
-		bne	warm_skip_close
-		jsr	nclose_n_device		; send CLOSE to FujiNet
-warm_skip_close
-		lda	#$00
-		sta	device_type		; clear device type
-		jmp	start_vbxe_check
-
-cold_start
-; First boot: save real DOSVEC, then hook it so RESET re-enters this app.
-		lda	DOSVEC
-		sta	real_dosvec
-		lda	DOSVEC+1
-		sta	real_dosvec+1
-		lda	#<start
-		sta	DOSVEC
-		lda	#>start
-		sta	DOSVEC+1
-		lda	#$A5
-		sta	warm_start_flag
-		lda	#$5A
-		sta	warm_start_flag+1
-
-start_vbxe_check
-		lda	core_version
-		cmp	#$10			; $10 means fx core in core_version
-		beq	core_fx
+		jsr	_vbxe_init
+		bne	vbxe_ok
 
 ; print an error message in case of missing or non fx core VBXE
 ; just set the ICBA and call another routine since printing to E: will be used twice.
+		lda	#$00
+		sta	memac_bank_sel		; close MEMAC window if it was left open
+		sta	memac_control		; disable MEMAC CPU mapping
+		sta	video_control		; disable VBXE video path
+		lda	#$22
+		sta	SDMCTL			; restore a normal ANTIC text DMA mode
 		lda	#<no_vbxe_msg
 		sta	ICBA
 		lda	#>no_vbxe_msg
 		sta	ICBA + 1
 		jmp	print_error
 
-; FX core detected - newer firmware versions may have different core_version values,
-; so we're being more permissive now. Just ensure it's an FX-like core.
-core_fx						; for FX core compatible versions (1.2x, 1.26, 1.40, etc)
-						; we'll accept the FX core and proceed without strict version checking
+vbxe_ok
+		lda	#<vbxe_load_cfg
+		ldx	#>vbxe_load_cfg
+		jsr	_vbxe_load_files
+		bne	vbxe_load_ok
 
-		lda	SDMCTL			; save current DMA control before VBXE takes over
-		sta	saved_sdmctl
-		lda	#$20			; shut off ANTIC DMA except instruction fetch
-		sta	SDMCTL
-
-; begin actually setting up the VBXE
+; library file-load failed; force ANTIC text mode and show a startup error.
 		lda	#$00
-		sta 	memac_b_control		; disable memac b window
-
-; vbxe_mem_base is the high address of what we want to use for our VBXE memory window
-; the first 4 bits of memac_control are the high nibble of the base address of the window
-; bits 0-1: window size (00=4K, 01=8K, 10=16K, 11=32K)
-; bit 2: MAE - ANTIC access enable
-; bit 3: MCE - CPU access enable
-; Keep a 4K window at A000-AFFF to avoid mapping into cartridge/ROM space.
-
-		lda	#(>vbxe_mem_base)|$8	; $08 = 1000b: 4K window (bits 0-1 = 00) + CPU access (bit 3 = 1)
+		sta	memac_bank_sel
 		sta	memac_control
+		sta	video_control
+		lda	#$22
+		sta	SDMCTL
+		lda	#<load_fail_msg
+		sta	ICBA
+		lda	#>load_fail_msg
+		sta	ICBA + 1
+		jmp	print_error
 
-; we are going to put a blitter list which clears the VBXE RAM into the first page of memory
-; so we set the bank
-
-		lda	#$80
-		sta	memac_bank_sel
-
-
-
-.scope						; copy the screen clearing blitter
-		ldx	#00
-loop		lda	clear_ram_bcb,x
-		sta	vbxe_mem_base,x
-		inx
-		cpx	#(clear_ram_end - clear_ram_bcb)
-		bne	loop
-.endscope
-
-; start the BCB
-
-		lda	#0
-		sta	blt_adr
-		sta	blt_adr + 1
-		sta	blt_adr + 2
-		lda	#1
-		sta	blt_start
-
-.scope						; wait until the blitter is done
-loop		lda	blt_busy
-		bne	loop
-.endscope
-
-; turn off the MEMAC_A window so that it doesn't conflict with the extended RAM window
-; this was causing issues with SDX
-		
-		lda	#0
-		sta	memac_bank_sel
-
-; done with VBXE init - jump to main program
-		jmp	load_files
+vbxe_load_ok
+		jmp	init_terminal_state
 		
 print_error					; prints the error message already set in ICBA
 		lda	#$FF
@@ -254,266 +184,26 @@ print_error					; prints the error message already set in ICBA
 		sta	ICCOM
 		jsr	CIOV
 
-; go back to DOS (use real_dosvec — DOSVEC now points back to this app)
-
-		jmp	(real_dosvec)
+; go back to DOS
+		jmp	exit_to_dos
 
 
 no_vbxe_msg					; message to display for missing VBXE or non-fx core
 		.byte	"No VBXE or non-fx core. Press return to continue.", $9B
 
-clear_ram_bcb					; blitter routine to clear the whole VBXE RAM. 
-						; we can only work with a 512 byte wide and 256 line high portion, or 128K, so we do that four times.
-		.faraddr 0			; source doesn't matter, we're using a fill value
-		.word	0			; source y step doesn't matter
-		.byte	0			; source x step doesn't matter
-		.faraddr clear_ram_end-clear_ram_bcb	; don't overwrite the blitter list
-		.word	512			; one line is 512 bytes (no lines really though, we're just doing the whole 512K)
-		.byte	1			; x step 1
-		.word	512-1			; 512 bytes wide
-		.byte	256-1			; 256 lines
-		.byte	0			; AND mask ignores source
-		.byte	0			; XOR mask fills with 0
-		.byte	0			; don't worry about collisions
-		.byte	0			; no zoom
-		.byte	0			; don't worry about patterns
-		.byte	%00001000		; there's 3 more of these BCB's, so next bit on, and mode 0 (copy mode)
-		
-		.faraddr 0			; source doesn't matter, we're using a fill value
-		.word	0			; source y step doesn't matter
-		.byte	0			; source x step doesn't matter
-		.faraddr $020000		; destination starts at 128K
-		.word	512			; one line is 512 bytes (no lines really though, we're just doing the whole 512K)
-		.byte	1			; x step 1
-		.word	512-1			; 512 bytes wide
-		.byte	256-1			; 256 lines
-		.byte	0			; AND mask ignores source
-		.byte	0			; XOR mask fills with 0
-		.byte	0			; don't worry about collisions
-		.byte	0			; no zoom
-		.byte	0			; don't worry about patterns
-		.byte	%00001000		; there's 2 more of these BCB's, so next bit on, and mode 0 (copy mode)
-		
-		.faraddr 0			; source doesn't matter, we're using a fill value
-		.word	0			; source y step doesn't matter
-		.byte	0			; source x step doesn't matter
-		.faraddr $040000		; destination starts at 256K
-		.word	512			; one line is 512 bytes (no lines really though, we're just doing the whole 512K)
-		.byte	1			; x step 1
-		.word	512-1			; 512 bytes wide
-		.byte	256-1			; 256 lines
-		.byte	0			; AND mask ignores source
-		.byte	0			; XOR mask fills with 0
-		.byte	0			; don't worry about collisions
-		.byte	0			; no zoom
-		.byte	0			; don't worry about patterns
-		.byte	%00001000		; there's 1 more of these BCB's, so next bit on, and mode 0 (copy mode)
-		
-		.faraddr 0			; source doesn't matter, we're using a fill value
-		.word	0			; source y step doesn't matter
-		.byte	0			; source x step doesn't matter
-		.faraddr $060000		; destination starts at 384K
-		.word	512			; one line is 512 bytes (no lines really though, we're just doing the whole 512K)
-		.byte	1			; x step 1
-		.word	512-1			; 512 bytes wide
-		.byte	256-1			; 256 lines
-		.byte	0			; AND mask ignores source
-		.byte	0			; XOR mask fills with 0
-		.byte	0			; don't worry about collisions
-		.byte	0			; no zoom
-		.byte	0			; don't worry about patterns
-		.byte	%00000000		; there's no more of these BCB's, so next bit off, and mode 0 (copy mode)
-clear_ram_end
+load_fail_msg					; message to display if library load step fails
+		.byte	"VBXE startup load failed. Press return to continue.", $9B
 
-;###################################################################################################################		
-; start of loading files.
-load_files
+vbxe_load_cfg					; vbxe_load_cfg_t for _vbxe_load_files
+		.addr	font_path
+		.addr	pallette_path
+		.addr	xdl
+		.word	bcb_end - xdl
 
-; make sure IOCB 1 is closed
-
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
-
-; open the font file in IOCB 1
-
-		ldx	#$10
-		lda	#$03
-		sta	ICCOM+$10
-		lda	#<font_path
-		sta	ICBA+$10
-		lda	#>font_path
-		sta	ICBA+$11
-		lda	#$04
-		sta	ICAX1+$10
-		lda	#$00
-		sta	ICAX2+$10
-		jsr	CIOV
-	
-; set bank to beginning of VBXE memory with bit 7 set to enable the window
-; this is where we will load the font
-
-		lda	#$80
-		sta	memac_bank_sel
-
-; load the entire (2K) font into the VBXE memory window
-
-		ldx	#$10			; IOCB 1
-		lda	#$07			; read binary record
-		sta	ICCOM+$10
-		lda	#$00			; buffer address is vbxe_mem_base
-		sta	ICBA+$10
-		lda	#>vbxe_mem_base
-		sta	ICBA+$11
-		lda	#$00			; buffer length is 2K
-		sta	ICBL+$10
-		lda	#$08
-		sta	ICBL+$11
-		jsr	CIOV
-
-; close the font file (we only need to load it once)
-
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
-
-; open the pallette file
-
-		ldx	#$10
-		lda	#$03
-		sta	ICCOM+$10
-		lda	#<pallette_path
-		sta	ICBA+$10
-		lda	#>pallette_path
-		sta	ICBA+$11
-		lda	#$04
-		sta	ICAX1+$10
-		lda	#$00
-		sta	ICAX2+$10
-		jsr	CIOV
-
-; read the pallette to a temporary location inside VBXE memory (which we know is free for now)
-
-		ldx	#$10			; IOCB 1
-		lda	#$07			; read binary record
-		sta	ICCOM+$10
-		lda	#$00			; buffer address is vbxe_mem_base + $0800
-		sta	ICBA+$10
-		lda	#>vbxe_mem_base + $08
-		sta	ICBA+$11
-		lda	#$30			; buffer length is 48 bytes ($30)
-		sta	ICBL+$10
-		lda	#$00
-		sta	ICBL+$11
-		jsr	CIOV
-
-; close the pallette, we have it in RAM now
-
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
-
-; initialize csel and psel to start loading colors into the pallette
-
-		lda	#$00
-		sta	psel
-		sta	csel
-
-.scope						; load the foreground colors into the VBXE
-; we use a nested loop here due to the design of the text mode colors
-; we need to load the 16 foreground colors into the first 128 colors in order, and do that 8 times
-; this order will be like:
-; col 1, col 2, col 3, ..., col F, col 1, col 2 etc.
-
-		ldy	#$00			; initialize the outer loop counter
-fore_outer_loop	ldx	#$00			; initialize the inner loop counter
-fore_inner_loop	lda	vbxe_mem_base + $0800,x	; load the color values. use index x because of the order we need to load colors in
-		sta	cr
-		lda	vbxe_mem_base + $0801,x
-		sta	cg
-		lda	vbxe_mem_base + $0802,x
-		sta	cb
-		inc	csel			; move to next color entry
-		inx				; increment 3 times because each color is 3 bytes
-		inx
-		inx
-		cpx	#$30			; once x is equal to $30, we have loaded all the colors
-		bne	fore_inner_loop
-	
-		iny				; increment the outer loop counter
-		cpy	#$08			; so we can do it for 8 times total
-		bne	fore_outer_loop
-.endscope
-
-
-.scope						; load the background colors into the VBXE
-; we use a nested loop here, but differently again due to the design of text mode colors
-; we need to load the 8 background colors 16 times in a row each
-; that is, load color 0 16 times, then load color 1 16 times, etc.
-
-		ldy	#$00			; initialize the outer loop counter
-back_outer_loop	ldx	#$00			; initialize the inner loop counter
-back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y because we load each color repeatedly
-		sta	cr
-		lda	vbxe_mem_base + $0801,y
-		sta	cg
-		lda	vbxe_mem_base + $0802,y
-		sta	cb
-		inc	csel			; move to next color entry
-		inx				; increment the inner loop
-		cpx	#$10			; stop after the color has been loaded 16 times
-		bne	back_inner_loop
-		iny				; increment 3 times because each color is 3 bytes
-		iny
-		iny
-		cpy	#$18			; when we get to $18, we have loaded all the background colors
-		bne	back_outer_loop
-.endscope
-; load the xdl and blitter lists
-
-		lda	#<xdl			; setup source pointer
-		sta	src_ptr
-		lda	#>xdl
-		sta	src_ptr+1
-		
-		lda	#<(vbxe_mem_base+$0800)	; destination pointer
-		sta	dst_ptr
-		lda	#>(vbxe_mem_base+$0800)
-		sta	dst_ptr+1
-		
-		lda	#<(bcb_end - xdl - 1)	; and byte count - 1
-		sta	counter
-		lda	#>(bcb_end - xdl)
-		sta	counter+1
-		
-		jsr	mem_move
-		
-; load the xdl address ($0800 in internal VBXE memory)
-
-		lda	#$00
-		sta	xdl_adr			; low byte = $00
-		lda	#$08
-		sta	xdl_adr_mid		; middle byte = $08
-		lda	#$00
-		sta	xdl_adr_high		; high byte = $00
-
-; enable xdl and disable transparent colors
-
-		lda	#$05
-		sta	video_control
-
-; set the memac window to the display ram (the top of VBXE memory)
-
-		lda	#$FF
-		sta	memac_bank_sel
-
-; done initializing the VBXE
 ;###################################################################################################################
 ; now we start initializing the variables for the terminal state
 ; initialize the cursor address to be at the home position
+init_terminal_state
 
 		lda	#<vbxe_screen_top
 		sta	cursor_address
@@ -542,6 +232,18 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 
 ; device type: 0 = R:, 1 = N:
 		sta	device_type
+
+; Save OS vectors/PACTL once so exit_to_dos can always restore cleanly.
+		lda	VKEYBD
+		sta	old_vkeybd
+		lda	VKEYBD+1
+		sta	old_vkeybd+1
+		lda	VPRCED
+		sta	n_old_vprced
+		lda	VPRCED+1
+		sta	n_old_vprced+1
+		lda	PACTL
+		sta	n_old_pactl
 
 ; LF-as-CRLF mode: default on (most hosts send bare LF expecting terminal to add CR)
 		lda	#$01
@@ -585,6 +287,11 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 ; device selection: prompt the user to choose R: serial or N: FujiNet
 
 device_select
+		jsr	scroll_page		; clear screen
+		lda	#$00			; move cursor to top-left
+		sta	row
+		sta	column
+		jsr	recalc_cursor
 		lda	#<banner_msg
 		ldx	#>banner_msg
 		jsr	print_str
@@ -633,9 +340,15 @@ device_select
 		beq	choose_n
 		cmp	#'n'
 		beq	choose_n
+;		cmp	#'Q'
+;		beq	choose_quit
+;		cmp	#'q'
+;		beq	choose_quit
 
 choose_r
 ; echo 'R' to VBXE, close K:, open R: serial device
+		lda	#$00
+		sta	device_type		; R: = 0 (clear in case we're retrying after a failed N: attempt)
 		lda	#'R'
 		sta	temp_char
 		jsr	process_char
@@ -647,6 +360,14 @@ choose_r
 		jsr	CIOV
 		jsr	open_r_device
 		jmp	device_open
+
+;choose_quit
+;; Close K: on IOCB 2, clean up VBXE, and exit to DOS.
+;		ldx	#$20
+;		lda	#$0C			; CMD_CLOSE K:
+;		sta	ICCOM+$20
+;		jsr	CIOV
+;		jmp	exit_to_dos
 
 choose_n
 ; Echo 'N', newline, then step the user through connection details.
@@ -865,8 +586,7 @@ wait_for_return
 		lda	#$00
 		sta	ICBL+1
 		jsr	CIOV
-		jsr	restore_graphics
-		jmp	(DOSVEC)
+		jmp	device_select
 
 device_open
 ; flush any keystrokes buffered during device selection
@@ -2699,33 +2419,115 @@ ok		ldy	#$01			; positive Y = success
 		rti
 .endproc
 
-.proc restore_graphics
-; Make VBXE overlay invisible, then restore SDMCTL for normal ANTIC display.
-; Strategy: change the XDL's first OVOFF+RPTL entry to cover ALL 216 scanlines,
-; then keep XDL *enabled* (video_control=$01) so VBXE processes the OVOFF entry
-; each frame and outputs nothing. Setting video_control=$00 kills XDL processing
-; before the OVOFF takes effect, leaving VBXE frozen on the last rendered frame.
-; XDL lives at VBXE $0800; the RPTL count byte is at $0802 → CPU $A802 (bank 0).
-		lda	#$80
-		sta	memac_bank_sel			; bank 0: VBXE $0000-$0FFF at $A000-$AFFF
-		lda	#216-1				; OVOFF for all visible scanlines
-		sta	vbxe_mem_base + $802		; XDL line-count byte at VBXE $0802
-		lda	#$01				; XDL enabled, color 0 transparent (no_trans=0)
-		sta	video_control			; VBXE now renders nothing — GTIA shows through
-		lda	#$00
-		sta	memac_bank_sel			; close MEMAC window
-		sta	memac_control			; disable MEMAC A CPU access
-		lda	saved_sdmctl			; restore original ANTIC DMA control
-		sta	SDMCTL
+.proc restore_os_hooks
+; Restore IRQ/vector state that may have been modified while terminal was active.
+		lda	PACTL
+		and	#$FE
+		sta	PACTL			; disable PROCEED IRQ before touching VPRCED
+
+		lda	n_old_vprced
+		sta	VPRCED
+		lda	n_old_vprced+1
+		sta	VPRCED+1
+
+		lda	n_old_pactl
+		and	#$FE
+		sta	PACTL			; restore PACTL state but keep PROCEED IRQ disabled
+
+		sei
+		lda	old_vkeybd
+		sta	VKEYBD
+		lda	old_vkeybd+1
+		sta	VKEYBD+1
+		cli
+
+		ldx	#$10
+		lda	#$0C			; close IOCB 1 (R:/N:) if open
+		sta	ICCOM+$10
+		jsr	CIOV
 		rts
 .endproc
 
+.proc restore_graphics
+		lda	#$00
+		sta	SDMCTL				; blank ANTIC immediately during teardown
+		sta	$D400				; keep shadow/hardware DMACTL in sync
+
+		jsr	_vbxe_shutdown
+
+		; _vbxe_shutdown already restored SDMCTL from startup state.
+		; Mirror that restored shadow value to hardware DMACTL immediately.
+		lda	SDMCTL
+		sta	$D400
+
+		lda	#$00
+		sta	$D01B				; PRIOR (hardware): normal GTIA priority mode
+		sta	$026F				; GPRIOR shadow
+
+		lda	#$C0
+		sta	$D40E				; NMIEN: enable VBI + DLI (OS default-compatible)
+
+		lda	#$00
+
+		sta	$D016				; COLPF0
+		sta	$D017				; COLPF1
+		sta	$D018				; COLPF2
+		sta	$D019				; COLPF3
+		sta	$D01A				; COLBK
+		sta	$02C4				; COLOR0 shadow
+		sta	$02C5				; COLOR1 shadow
+		sta	$02C6				; COLOR2 shadow
+		sta	$02C7				; COLOR3 shadow
+		sta	$02C8				; COLOR4 shadow
+
+		; Re-open IOCB 0 to E: in text mode so DOS resumes on a clean console.
+		ldx	#$00
+		lda	#$0C
+		sta	ICCOM
+		jsr	CIOV
+
+		; Force a fresh OS text display list and palette via screen handler.
+		lda	#$03
+		sta	ICCOM
+		lda	#<s_device
+		sta	ICBA
+		lda	#>s_device
+		sta	ICBA+1
+		lda	#$00				; graphics mode 0
+		sta	ICAX1
+		sta	ICAX2
+		jsr	CIOV
+
+		lda	#$0C
+		sta	ICCOM
+		jsr	CIOV
+
+		lda	#$03
+		sta	ICCOM
+		lda	#<e_device
+		sta	ICBA
+		lda	#>e_device
+		sta	ICBA+1
+		lda	#$00
+		sta	ICAX1
+		sta	ICAX2
+		jsr	CIOV
+		rts
+.endproc
+
+exit_to_dos
+		jsr	restore_os_hooks
+		jsr	restore_graphics
+		jmp	(DOSVEC)		; return directly to DOS command processor
+
 send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
-banner_msg	.byte	"VBXETERM v0.06 (2026-04-28)", $9B
+banner_msg	.byte	"VBXETERM v0.08 (2026-05-01)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
 kbd_dev		.byte	"K:", $9B
+s_device	.byte	"S:", $9B
+e_device	.byte	"E:", $9B
 select_buf	.res	4, $00
 connecting_msg	.byte	"Connecting...", $9B
 n_open_ok_msg	.byte	"Connected.", $9B
@@ -2746,8 +2548,6 @@ proto_byte	.res	1, $00
 n_old_vprced	.res	2, $00			; saved VPRCED vector
 n_old_pactl	.byte	$00			; saved PACTL state
 old_vkeybd	.res	2, $00			; saved VKEYBD vector (OS keyboard IRQ)
-warm_start_flag	.res	2, $00			; $A5,$5A = app has run before (RESET vs cold boot)
-real_dosvec	.res	2, $00			; real DOS entry point saved at cold boot
 login_buf	.res	256, $00		; username buffer (256 bytes — FujiNet $FD expects 256)
 password_buf	.res	256, $00		; password buffer (256 bytes — FujiNet $FE expects 256)
 
@@ -3260,6 +3060,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.06.2026.04.28"
+version		.byte	"v0.07.2026.04.29"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
