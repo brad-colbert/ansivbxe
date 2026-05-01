@@ -1,6 +1,7 @@
 MADS      ?= mads
 CA65      ?= ca65
 LD65      ?= ld65
+AR65      ?= ar65
 
 PROJ_NAME   = ANSIVBXE
 DISK_DIR    = disk
@@ -18,17 +19,29 @@ CA65_ATR    = $(PROJ_NAME)_ca65.ATR
 CA65_CFG    ?= /usr/local/share/cc65/cfg/atari-asm-xex.cfg
 START_ADDR  ?= 0x2800
 
-.PHONY: all disk ca65 ca65-disk mads mads-disk clean
+VBXE_LIB_SRC = vbxe_lib.asm
+VBXE_LIB_OBJ = vbxe_lib.o
+VBXE_LIB     = vbxe_lib.lib
+
+.PHONY: all disk ca65 ca65-disk mads mads-disk vbxe-lib clean
 
 all: mads ca65
+
+vbxe-lib: $(VBXE_LIB)
+
+$(VBXE_LIB_OBJ): $(VBXE_LIB_SRC) $(CA65_DEPS)
+	$(CA65) $(VBXE_LIB_SRC) -o $(VBXE_LIB_OBJ)
+
+$(VBXE_LIB): $(VBXE_LIB_OBJ)
+	$(AR65) a $@ $<
 
 ca65: $(CA65_XEX)
 
 $(CA65_OBJ): $(CA65_SRC) $(CA65_DEPS)
 	$(CA65) $(CA65_SRC) -o $(CA65_OBJ)
 
-$(CA65_XEX): $(CA65_OBJ)
-	$(LD65) -C $(CA65_CFG) -S $(START_ADDR) -D start=$(START_ADDR) --mapfile $(PROJ_NAME)_ca65.map $(CA65_OBJ) -o $(CA65_XEX)
+$(CA65_XEX): $(CA65_OBJ) $(VBXE_LIB)
+	$(LD65) -C $(CA65_CFG) -S $(START_ADDR) -D start=$(START_ADDR) --mapfile $(PROJ_NAME)_ca65.map $(CA65_OBJ) $(VBXE_LIB) -o $(CA65_XEX)
 
 ca65-disk: $(CA65_ATR)
 
@@ -50,4 +63,4 @@ $(MADS_ATR): $(MADS_XEX)
 	dir2atr -b MyDos4534 720 $(MADS_ATR) $(DISK_DIR)/
 
 clean:
-	rm -f $(MADS_XEX) $(MADS_ATR) $(CA65_OBJ) $(CA65_XEX) $(CA65_ATR)
+	rm -f $(MADS_XEX) $(MADS_ATR) $(CA65_OBJ) $(CA65_XEX) $(CA65_ATR) $(VBXE_LIB_OBJ) $(VBXE_LIB)

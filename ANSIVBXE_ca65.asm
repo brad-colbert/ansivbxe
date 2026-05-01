@@ -53,6 +53,8 @@
 	.include "atarihardware_ca65.inc"	; general atari hardware equates,
 	.include "VBXE_ca65.inc"		; and VBXE equates
 
+	.import	_vbxe_init, _vbxe_load_files, _vbxe_shutdown
+
 ; VBXE equates
 vbxe_mem_base	= $A000				; If I put it here, it should be OK and it won't conflict with the extended RAM.
 
@@ -123,42 +125,44 @@ saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
 ; VBXE initialization
 ; check core version. needs to be fx core.
 start
-		lda	core_version
-		cmp	#$10			; $10 means fx core in core_version
-		beq	core_fx
+		jsr	_vbxe_init
+		bne	vbxe_ok
 
 ; print an error message in case of missing or non fx core VBXE
 ; just set the ICBA and call another routine since printing to E: will be used twice.
+		lda	#$00
+		sta	memac_bank_sel		; close MEMAC window if it was left open
+		sta	memac_control		; disable MEMAC CPU mapping
+		sta	video_control		; disable VBXE video path
+		lda	#$22
+		sta	SDMCTL			; restore a normal ANTIC text DMA mode
 		lda	#<no_vbxe_msg
 		sta	ICBA
 		lda	#>no_vbxe_msg
 		sta	ICBA + 1
 		jmp	print_error
 
-; FX core detected - newer firmware versions may have different core_version values,
-; so we're being more permissive now. Just ensure it's an FX-like core.
-core_fx						; for FX core compatible versions (1.2x, 1.26, 1.40, etc)
-						; we'll accept the FX core and proceed without strict version checking
+vbxe_ok
+		lda	#<vbxe_load_cfg
+		ldx	#>vbxe_load_cfg
+		jsr	_vbxe_load_files
+		bne	vbxe_load_ok
 
-		lda	SDMCTL			; save current DMA control before VBXE takes over
-		sta	saved_sdmctl
-		lda	#$20			; shut off ANTIC DMA except instruction fetch
-		sta	SDMCTL
-
-; begin actually setting up the VBXE
+; library file-load failed; force ANTIC text mode and show a startup error.
 		lda	#$00
-		sta 	memac_b_control		; disable memac b window
-
-; Keep a 4K window at A000-AFFF to avoid mapping into cartridge/ROM space.
-		lda	#(>vbxe_mem_base)|$8	; 4K window, CPU access enabled
-		sta	memac_control
-
-; Open MEMAC window to bank 0 (VBXE $0000-$0FFF) for font and XDL loading.
-		lda	#$80
 		sta	memac_bank_sel
+		sta	memac_control
+		sta	video_control
+		lda	#$22
+		sta	SDMCTL
+		lda	#<load_fail_msg
+		sta	ICBA
+		lda	#>load_fail_msg
+		sta	ICBA + 1
+		jmp	print_error
 
-; done with VBXE init - jump to main program
-		jmp	load_files
+vbxe_load_ok
+		jmp	init_terminal_state
 		
 print_error					; prints the error message already set in ICBA
 		lda	#$FF
@@ -187,6 +191,15 @@ print_error					; prints the error message already set in ICBA
 
 no_vbxe_msg					; message to display for missing VBXE or non-fx core
 		.byte	"No VBXE or non-fx core. Press return to continue.", $9B
+
+load_fail_msg					; message to display if library load step fails
+		.byte	"VBXE startup load failed. Press return to continue.", $9B
+
+vbxe_load_cfg					; vbxe_load_cfg_t for _vbxe_load_files
+		.addr	font_path
+		.addr	pallette_path
+		.addr	xdl
+		.word	bcb_end - xdl
 
 clear_ram_bcb					; blitter routine to clear the whole VBXE RAM. 
 						; we can only work with a 512 byte wide and 256 line high portion, or 128K, so we do that four times.
@@ -254,209 +267,15 @@ clear_ram_end
 ;###################################################################################################################		
 ; start of loading files.
 load_files
+;		Legacy inline startup loader removed.
+;		Startup now uses _vbxe_load_files via vbxe_load_cfg in start.
+;		Label is retained only to avoid stale references from old documentation/notes.
+		jmp	init_terminal_state
 
-; make sure IOCB 1 is closed
-
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
-
-; open the font file in IOCB 1
-
-		ldx	#$10
-		lda	#$03
-		sta	ICCOM+$10
-		lda	#<font_path
-		sta	ICBA+$10
-		lda	#>font_path
-		sta	ICBA+$11
-		lda	#$04
-		sta	ICAX1+$10
-		lda	#$00
-		sta	ICAX2+$10
-		jsr	CIOV
-	
-; set bank to beginning of VBXE memory with bit 7 set to enable the window
-; this is where we will load the font
-
-		lda	#$80
-		sta	memac_bank_sel
-
-; load the entire (2K) font into the VBXE memory window
-
-		ldx	#$10			; IOCB 1
-		lda	#$07			; read binary record
-		sta	ICCOM+$10
-		lda	#$00			; buffer address is vbxe_mem_base
-		sta	ICBA+$10
-		lda	#>vbxe_mem_base
-		sta	ICBA+$11
-		lda	#$00			; buffer length is 2K
-		sta	ICBL+$10
-		lda	#$08
-		sta	ICBL+$11
-		jsr	CIOV
-
-; close the font file (we only need to load it once)
-
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
-
-; open the pallette file
-
-		ldx	#$10
-		lda	#$03
-		sta	ICCOM+$10
-		lda	#<pallette_path
-		sta	ICBA+$10
-		lda	#>pallette_path
-		sta	ICBA+$11
-		lda	#$04
-		sta	ICAX1+$10
-		lda	#$00
-		sta	ICAX2+$10
-		jsr	CIOV
-
-; read the pallette to a temporary location inside VBXE memory (which we know is free for now)
-
-		ldx	#$10			; IOCB 1
-		lda	#$07			; read binary record
-		sta	ICCOM+$10
-		lda	#$00			; buffer address is vbxe_mem_base + $0800
-		sta	ICBA+$10
-		lda	#>vbxe_mem_base + $08
-		sta	ICBA+$11
-		lda	#$30			; buffer length is 48 bytes ($30)
-		sta	ICBL+$10
-		lda	#$00
-		sta	ICBL+$11
-		jsr	CIOV
-
-; close the pallette, we have it in RAM now
-
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
-
-; initialize csel and psel to start loading colors into the pallette
-
-		lda	#$00
-		sta	psel
-		sta	csel
-
-.scope						; load the foreground colors into the VBXE
-; we use a nested loop here due to the design of the text mode colors
-; we need to load the 16 foreground colors into the first 128 colors in order, and do that 8 times
-; this order will be like:
-; col 1, col 2, col 3, ..., col F, col 1, col 2 etc.
-
-		ldy	#$00			; initialize the outer loop counter
-fore_outer_loop	ldx	#$00			; initialize the inner loop counter
-fore_inner_loop	lda	vbxe_mem_base + $0800,x	; load the color values. use index x because of the order we need to load colors in
-		sta	cr
-		lda	vbxe_mem_base + $0801,x
-		sta	cg
-		lda	vbxe_mem_base + $0802,x
-		sta	cb
-		inc	csel			; move to next color entry
-		inx				; increment 3 times because each color is 3 bytes
-		inx
-		inx
-		cpx	#$30			; once x is equal to $30, we have loaded all the colors
-		bne	fore_inner_loop
-	
-		iny				; increment the outer loop counter
-		cpy	#$08			; so we can do it for 8 times total
-		bne	fore_outer_loop
-.endscope
-
-
-.scope						; load the background colors into the VBXE
-; we use a nested loop here, but differently again due to the design of text mode colors
-; we need to load the 8 background colors 16 times in a row each
-; that is, load color 0 16 times, then load color 1 16 times, etc.
-
-		ldy	#$00			; initialize the outer loop counter
-back_outer_loop	ldx	#$00			; initialize the inner loop counter
-back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y because we load each color repeatedly
-		sta	cr
-		lda	vbxe_mem_base + $0801,y
-		sta	cg
-		lda	vbxe_mem_base + $0802,y
-		sta	cb
-		inc	csel			; move to next color entry
-		inx				; increment the inner loop
-		cpx	#$10			; stop after the color has been loaded 16 times
-		bne	back_inner_loop
-		iny				; increment 3 times because each color is 3 bytes
-		iny
-		iny
-		cpy	#$18			; when we get to $18, we have loaded all the background colors
-		bne	back_outer_loop
-.endscope
-; load the xdl and blitter lists
-
-		lda	#<xdl			; setup source pointer
-		sta	src_ptr
-		lda	#>xdl
-		sta	src_ptr+1
-		
-		lda	#<(vbxe_mem_base+$0800)	; destination pointer
-		sta	dst_ptr
-		lda	#>(vbxe_mem_base+$0800)
-		sta	dst_ptr+1
-		
-		lda	#<(bcb_end - xdl - 1)	; and byte count - 1
-		sta	counter
-		lda	#>(bcb_end - xdl)
-		sta	counter+1
-		
-		jsr	mem_move
-		
-; load the xdl address ($0800 in internal VBXE memory)
-
-		lda	#$00
-		sta	xdl_adr			; low byte = $00
-		lda	#$08
-		sta	xdl_adr_mid		; middle byte = $08
-		lda	#$00
-		sta	xdl_adr_high		; high byte = $00
-
-; enable xdl and disable transparent colors
-
-		lda	#$05
-		sta	video_control
-
-; set the memac window to the display ram (the top of VBXE memory)
-
-		lda	#$FF
-		sta	memac_bank_sel
-
-; Clear screen buffer: VBXE $07F100-$07FFFF = CPU $A100-$AFFF = 3840 bytes.
-; Replaces the full blitter clear. On power-up VBXE RAM is uninit; on SDX
-; autorun reload it holds the previous session's screen. Either way we zero it
-; here so device_select starts with a blank display.
-		lda	#$00
-		sta	dst_ptr
-		lda	#$A1
-		sta	dst_ptr+1		; dst_ptr → $A100 (= VBXE $7F100 via MEMAC $FF)
-		ldx	#15			; 15 pages × 256 = 3840 bytes
-@pg		ldy	#$00
-@by		sta	(dst_ptr),y
-		iny
-		bne	@by
-		inc	dst_ptr+1
-		dex
-		bne	@pg
-
-; done initializing the VBXE
 ;###################################################################################################################
 ; now we start initializing the variables for the terminal state
 ; initialize the cursor address to be at the home position
+init_terminal_state
 
 		lda	#<vbxe_screen_top
 		sta	cursor_address
