@@ -250,6 +250,7 @@ See [license.txt](license.txt) for full terms. In short:
 
 - Free to use and distribute
 - May be sold only if the buyer is informed it is also available for free and agrees to pay anyway
+- Derivative works must retain license notices and credit original authors
 
 ---
 
@@ -257,5 +258,3 @@ See [license.txt](license.txt) for full terms. In short:
 
 DarkForce BBS
 <img width="1470" height="1197" alt="image" src="https://github.com/user-attachments/assets/c8fb58ac-1469-4b29-9b02-d87ea72c83ee" />
-
-- Derivative works must retain license notices and credit original authors
