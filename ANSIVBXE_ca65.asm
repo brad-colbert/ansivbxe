@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.07
+;	Version: v0.09
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -2521,7 +2521,7 @@ exit_to_dos
 		jmp	(DOSVEC)		; return directly to DOS command processor
 
 send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
-banner_msg	.byte	"VBXETERM v0.08 (2026-05-01)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.09 (2026-05-01)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
