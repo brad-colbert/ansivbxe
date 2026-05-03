@@ -94,6 +94,7 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 		sta	saved_sdmctl
 		lda	#$20			; instruction-fetch only — shut off ANTIC display DMA
 		sta	SDMCTL
+		sta	$D400			; apply DMACTL change immediately (not just next VBI)
 
 		lda	#$00
 		sta	memac_b_control		; disable MEMAC B window

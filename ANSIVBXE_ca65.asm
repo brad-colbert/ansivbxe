@@ -247,6 +247,16 @@ init_terminal_state
 		lda	PACTL
 		sta	n_old_pactl
 
+; Install RESET warmstart hook so pressing RESET restores ANTIC/VBXE state first.
+		lda	DOSINI
+		sta	old_dosini
+		lda	DOSINI+1
+		sta	old_dosini+1
+		lda	#<reset_cleanup
+		sta	DOSINI
+		lda	#>reset_cleanup
+		sta	DOSINI+1
+
 ; Silence the OS SIO bus sound (the per-byte click/whine) for the duration of the session.
 ; TEMPORARILY DISABLED 2026-05-02 — investigating whether SOUNDR=0 was breaking SSH connections.
 ; Save/restore plumbing kept in place; just skipping the actual silence write for now.
@@ -2450,6 +2460,11 @@ ok		ldy	#$01			; positive Y = success
 
 .proc restore_os_hooks
 ; Restore IRQ/vector state that may have been modified while terminal was active.
+		lda	old_dosini
+		sta	DOSINI
+		lda	old_dosini+1
+		sta	DOSINI+1
+
 		lda	PACTL
 		and	#$FE
 		sta	PACTL			; disable PROCEED IRQ before touching VPRCED
@@ -2478,6 +2493,44 @@ ok		ldy	#$01			; positive Y = success
 		lda	saved_soundr		; restore OS SIO bus sound setting
 		sta	SOUNDR
 		rts
+.endproc
+
+.proc reset_cleanup
+; RESET warmstart hook: restore ANTIC/VBXE-visible state before DOS warm init.
+		lda	old_dosini
+		sta	DOSINI
+		lda	old_dosini+1
+		sta	DOSINI+1
+
+		lda	#$00
+		sta	video_control
+		sta	memac_bank_sel
+		sta	memac_control
+
+		lda	saved_sdmctl
+		sta	SDMCTL
+		sta	$D400
+
+		lda	n_old_vprced
+		sta	VPRCED
+		lda	n_old_vprced+1
+		sta	VPRCED+1
+
+		lda	n_old_pactl
+		and	#$FE
+		sta	PACTL
+
+		sei
+		lda	old_vkeybd
+		sta	VKEYBD
+		lda	old_vkeybd+1
+		sta	VKEYBD+1
+		cli
+
+		lda	saved_soundr
+		sta	SOUNDR
+
+		jmp	(old_dosini)
 .endproc
 
 .proc restore_graphics
@@ -2581,6 +2634,7 @@ proto_byte	.res	1, $00
 n_old_vprced	.res	2, $00			; saved VPRCED vector
 n_old_pactl	.byte	$00			; saved PACTL state
 old_vkeybd	.res	2, $00			; saved VKEYBD vector (OS keyboard IRQ)
+old_dosini	.res	2, $00			; saved DOSINI warm-init vector for RESET chaining
 saved_soundr	.res	1, $00			; saved SOUNDR (SIO bus sound) value
 login_buf	.res	256, $00		; username buffer (256 bytes — FujiNet $FD expects 256)
 password_buf	.res	256, $00		; password buffer (256 bytes — FujiNet $FE expects 256)
