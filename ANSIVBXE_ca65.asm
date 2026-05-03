@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.09
+;	Version: v0.11
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -2418,6 +2418,8 @@ ok		ldy	#$01			; positive Y = success
 		jsr	SIOV			; send username
 		lda	#$FE			; password command (reuse most params)
 		sta	DCOMND
+		lda	#$80			; DWRITE — SIOV overwrote DSTATS with result code
+		sta	DSTATS
 		lda	#<password_buf
 		sta	DBUFLO
 		lda	#>password_buf
@@ -2607,7 +2609,7 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.10 (2026-05-02)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.11 (2026-05-03)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -3148,6 +3150,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.07.2026.04.29"
+version		.byte	"v0.11.2026.05.03"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
