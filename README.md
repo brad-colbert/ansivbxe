@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.10  
+**Version:** v0.11  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -196,6 +196,9 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.11 — 2026-05-03
+- Fixed FujiNet SSH authentication on real hardware: the `$FE` password SIO call was missing a `DSTATS = $80` reset between it and the preceding `$FD` username call, so the OS sent the command frame with no transfer direction and the password buffer was never transmitted
 
 ### v0.10 — 2026-05-02
 - FujiNet N: device responsiveness improvements: keyboard sends now coalesce up to 64 bytes per SIO write (faster paste and burst typing), keystrokes flush during long inbound bursts so typing stays responsive while output renders, and PROCEED is re-armed earlier so back-to-back bursts have no render-time gap
