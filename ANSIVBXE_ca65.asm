@@ -117,6 +117,8 @@ n_trip		= $9D				; PROCEED interrupt trip flag (0=idle, 1=FujiNet has data)
 lf_mode		= $9E				; LF-as-CRLF flag (0=LF only, 1=LF implies CR+LF)
 saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
 
+SOUNDR		= $41				; OS SIO bus sound enable (0 = silent)
+
 	.segment "CODE"
 	.org	$2800				; start of program
 ; apparently this is safe for most DOSes
@@ -244,6 +246,14 @@ init_terminal_state
 		sta	n_old_vprced+1
 		lda	PACTL
 		sta	n_old_pactl
+
+; Silence the OS SIO bus sound (the per-byte click/whine) for the duration of the session.
+; TEMPORARILY DISABLED 2026-05-02 — investigating whether SOUNDR=0 was breaking SSH connections.
+; Save/restore plumbing kept in place; just skipping the actual silence write for now.
+		lda	SOUNDR
+		sta	saved_soundr
+;		lda	#$00
+;		sta	SOUNDR
 
 ; LF-as-CRLF mode: default on (most hosts send bare LF expecting terminal to add CR)
 		lda	#$01
@@ -633,14 +643,7 @@ wait_for_byte	jsr	check_sendbuf
 		lda	n_trip			; N: — only recv when FujiNet has signalled data
 		beq	wait_for_byte
 r_do_recv	jsr	recv_from_device
-		lda	device_type
-		beq	wait_for_byte		; R: — no trip flag management
-		lda	#$00
-		sta	n_trip			; clear trip flag after servicing
-		lda	PACTL
-		ora	#$01
-		sta	PACTL			; re-arm PROCEED interrupt
-		jmp	wait_for_byte
+		jmp	wait_for_byte		; n_trip clear + PROCEED re-arm now happen inside recv_from_device
 
 handle_disconnect_n
 ; Tear down the PROCEED interrupt, close N:, print message, restart device selection.
@@ -691,7 +694,15 @@ handle_disconnect_n
 		jmp	check_dvstat
 
 ; N: path — SIO STATUS to check bytes waiting, then SIO READ
-n_recv		lda	#FUJI_ID
+; Clear n_trip and re-arm PROCEED up front so any new burst arriving during
+; STATUS/READ/process is caught on the next wait_for_byte pass. Covers all exit
+; paths (no-data, disconnect, full read).
+n_recv		lda	#$00
+		sta	n_trip
+		lda	PACTL
+		ora	#$01
+		sta	PACTL
+		lda	#FUJI_ID
 		sta	DDEVIC
 		lda	n_unit
 		sta	DUNIT
@@ -799,6 +810,15 @@ next_byte	lda	recv_buffer, y		; get character from buffer
 
 		iny				; next character
 
+		tya				; every 32 bytes, drain queued keystrokes so typing
+		and	#$1F			; doesn't wait for the whole batch to finish rendering
+		bne	skip_pump
+		tya
+		pha
+		jsr	check_sendbuf
+		pla
+		tay
+skip_pump
 		cpy	recvbuflen
 		bne	next_byte
 done		rts
@@ -2123,44 +2143,53 @@ cs_nc		rts
 pb_nc		rts
 .endproc
 
-.proc check_sendbuf				; checks to see if the send buffer is empty, and sends it if it's not.
-; in the future, there may be a few different cases handled here.
-; the first is an empty buffer, so you return.
-; the second is a nonempty buffer, but only one character in the buffer (probably the next most common case next to no characters).
-; the third is a nonempty buffer with multiple characters in it
-; this one breaks down into two more cases, one where the bytes are contiguous, the other where they cross the end of the buffer
-; perhaps it's possible to prevent this case by resetting the buffer indexes to 0 once the buffer is empty.
-; however, this could conflict with the keyboard interupt if the interupt fires while inside this routine.
-; Right now, the only thing saving me from having to disable interupts for that scenario is that I never modify sendbufend
-; outside of the KBD IRQ
+MAX_SEND_BATCH	= 64				; max bytes per SIO/CIO send call (bounds half-duplex stall)
 
-		lda	sendbufstart
-		cmp	sendbufend
-		bne	not_empty		; jump if the buffer isn't empty
-		
-		rts				; or return otherwise
+.proc check_sendbuf				; drains queued keystrokes in one coalesced send.
+; kbd_irq only mutates sendbufend; we only mutate sendbufstart — race-safe without sei.
+; Drain up to MAX_SEND_BATCH bytes from send_buffer into send_stage_buf, then issue one
+; SIO 'W' (N:) or one CIO PUT_CHARS (R:) for the whole run.
 
-not_empty	inc	sendbufstart		; advance first (kbd_irq advances end before writing, so we advance before reading)
+		lda	sendbufend
+		sec
+		sbc	sendbufstart		; A = pending count (mod 256, ring math)
+		bne	have_data
+		rts
+have_data	cmp	#MAX_SEND_BATCH+1
+		bcc	keep_count
+		lda	#MAX_SEND_BATCH
+keep_count	sta	send_count
+
+		ldx	#$00
 		ldy	sendbufstart
+copy_loop	iny				; advance src before reading (mirrors kbd_irq's advance-before-write)
 		lda	send_buffer,y
-		sta	send_byte_buf		; SIO needs a buffer address, store byte there
+		sta	send_stage_buf,x
+		inx
+		cpx	send_count
+		bne	copy_loop
+		sty	sendbufstart		; commit: advance start by send_count (Y wrapped naturally)
 
 		lda	device_type
 		bne	n_send
 
-; R: send — CIO PUT_CHARS on IOCB 1
+; R: send — CIO PUT_CHARS on IOCB 1, multi-byte
 		ldx	#$10
 		lda	#$0B
 		sta	ICCOM+$10
-		lda	#$00
+		lda	#<send_stage_buf
+		sta	ICBA+$10
+		lda	#>send_stage_buf
+		sta	ICBA+$11
+		lda	send_count
 		sta	ICBL+$10
+		lda	#$00
 		sta	ICBL+$11
 		lda	#$0D
 		sta	ICAX1+$10
-		lda	send_byte_buf
 		jmp	CIOV
 
-; N: send — SIO Write one byte to FujiNet
+; N: send — SIO Write coalesced batch to FujiNet
 n_send		lda	#FUJI_ID
 		sta	DDEVIC
 		lda	n_unit
@@ -2169,15 +2198,15 @@ n_send		lda	#FUJI_ID
 		sta	DCOMND
 		lda	#$80			; write direction
 		sta	DSTATS
-		lda	#<send_byte_buf
+		lda	#<send_stage_buf
 		sta	DBUFLO
-		lda	#>send_byte_buf
+		lda	#>send_stage_buf
 		sta	DBUFHI
 		lda	#FUJI_TIMEOUT
 		sta	DTIMLO
 		lda	#$00
 		sta	DTIMHI
-		lda	#$01			; one byte
+		lda	send_count
 		sta	DBYTLO
 		sta	DAUX1
 		lda	#$00
@@ -2445,6 +2474,9 @@ ok		ldy	#$01			; positive Y = success
 		lda	#$0C			; close IOCB 1 (R:/N:) if open
 		sta	ICCOM+$10
 		jsr	CIOV
+
+		lda	saved_soundr		; restore OS SIO bus sound setting
+		sta	SOUNDR
 		rts
 .endproc
 
@@ -2520,8 +2552,9 @@ exit_to_dos
 		jsr	restore_graphics
 		jmp	(DOSVEC)		; return directly to DOS command processor
 
-send_byte_buf	.res	1, $00				; staging byte for SIO single-byte write
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.09 (2026-05-01)", $9B
+send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
+send_count	.res	1, $00				; bytes staged for the current send
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.10 (2026-05-02)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -2548,6 +2581,7 @@ proto_byte	.res	1, $00
 n_old_vprced	.res	2, $00			; saved VPRCED vector
 n_old_pactl	.byte	$00			; saved PACTL state
 old_vkeybd	.res	2, $00			; saved VKEYBD vector (OS keyboard IRQ)
+saved_soundr	.res	1, $00			; saved SOUNDR (SIO bus sound) value
 login_buf	.res	256, $00		; username buffer (256 bytes — FujiNet $FD expects 256)
 password_buf	.res	256, $00		; password buffer (256 bytes — FujiNet $FE expects 256)
 
