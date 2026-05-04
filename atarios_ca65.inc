@@ -27,6 +27,7 @@ DVSTAT3		=	$2ED
 CIOV		=	$E456			; address for CIO
 SIOV		=	$E459			; address for SIO
 DOSVEC		=	$A			; vector for DOS
+DOSINI		=	$0C			; DOS warm-init vector (called during RESET warmstart)
 WARMSV		=	$E474			; OS warmstart entry (RESET path)
 
 ; SIO parameter block

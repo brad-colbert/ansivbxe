@@ -7,6 +7,25 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.12] - 2026-05-03
+
+### Added
+- `HT` (Horizontal Tab, `$09`) advances the cursor to the next 8-column stop instead of being a no-op. Bash and other shells that emit raw tabs now align as expected.
+- `SGR 3` (italic) is aliased to inverse video so apps that emit italic now have a visible effect (VBXE has no italic font; real italic glyphs are tracked as a follow-up).
+- `SGR 23` (italic off) cancels the inverse alias.
+
+### Fixed
+- `SGR 22 / 24 / 25 / 27` (cancel bold / underline / blink / inverse) were silently dropped because the dispatcher's high-BCD-nibble routing had no entry for `$20`. They now reach the existing `un_bold` / `un_inverse` handlers (or a documented no-op for codes with no VBXE rendering, like underline).
+- `SGR 4` (underline) was silently dropped in `simple_attrib`'s cmp-chain. Now explicitly routed to a no-op so the parser state can't drift on apps that toggle underline.
+- `SGR 51 – 55` (framed / encircled / overlined / cancellations) were silently dropped. They now route to a documented no-op so the parser doesn't accidentally fall through into unrelated handlers.
+
+### Changed
+- Refactored the SGR `is_last_parm` dispatch from short branches (`beq target`) to long branches (`bne skip / jmp target / skip:`). The 6502's ±127-byte branch reach was about to break with the new entries; the long-branch pattern future-proofs the SGR area against the next addition.
+- `HTS` (`$88`) and `SD` (`ESC[T`) comments updated to honestly describe why they remain stubbed (custom tab-stop tables and reverse-direction blitter, respectively) instead of misrepresenting them as forgotten.
+- Removed an orphaned `EL` header comment block that incorrectly claimed only `n=0` was supported (the actual handler supports modes 0/1/2).
+
+---
+
 ## [0.11] - 2026-05-03
 
 ### Fixed

@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.11
+;	Version: v0.12
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -1103,8 +1103,7 @@ no_borrow	dec	cursor_address		; if it weren't for the fact that cursor_address s
 .endproc
 NUL_adr						; null does nothing
 ENQ_adr						; Enquiry is probably supposed to return an ACK, but for now, it does nothing
-HT_adr						; Horizontal Tab normally causes the cursor to move to the next tab stop. for now, nothing
-HTS_adr						; no tab stuff just yet
+HTS_adr						; tab-stop table not implemented; HT uses fixed 8-column stops
 HTJ_adr
 VTS_adr
 BPH_adr						; BPH doesn't apply in this case.
@@ -1131,6 +1130,20 @@ OSC_adr
 PM_adr
 APC_adr
 		rts
+.proc HT_adr					; Horizontal Tab: advance to next 8-column stop
+		jsr	cursor_off
+		lda	column
+		and	#$F8			; round down to current 8-col boundary
+		clc
+		adc	#8			; advance one stop
+		cmp	#80			; clamp at right margin
+		bcc	ok
+		lda	#79
+ok		sta	column
+		jsr	recalc_cursor
+		jmp	cursor_on
+.endproc
+
 NEL_adr						; Next Line is combination of CR and LF
 		jsr	CR_adr
 		jmp	LF_adr
@@ -1173,12 +1186,55 @@ parse_parm
 .proc is_last_parm
 		lda	parameter_val
 		and	#$F0
-		beq	simple_attrib		; if it's zero, it's a simple attribute (bold, inverse, etc.)
-		cmp	#$30
-		beq	forecolor_attr		; foreground (text) color change
-		cmp	#$40
-		beq	backcolor_attr		; background color change
-		rts				; otherwise it's not supported
+		bne	not_simple
+		jmp	simple_attrib		; if zero high nibble, simple attribute
+not_simple	cmp	#$20
+		bne	not_reset
+		jmp	reset_attrib		; cancel-attribute codes 22/24/25/27
+not_reset	cmp	#$30
+		bne	not_fc
+		jmp	forecolor_attr		; foreground (text) color change
+not_fc		cmp	#$40
+		bne	not_bc
+		jmp	backcolor_attr		; background color change
+not_bc		cmp	#$50
+		bne	not_dec
+		jmp	decoration_attr		; 50s range: framed/encircled/overlined etc.
+not_dec		rts				; otherwise it's not supported
+
+.proc forecolor_attr
+		lda	parameter_val
+		cmp	#$38
+		bcs	ignore
+		and	#$0F
+		sta	parameter_val
+		lda	text_color
+		and	#$F8
+		ora	parameter_val
+		sta	text_color
+ignore		rts
+.endproc
+
+.proc backcolor_attr
+		lda	parameter_val
+		cmp	#$48
+		bcs	ignore
+		and	#$0F
+		asl
+		asl
+		asl
+		asl
+		sta	parameter_val
+		lda	text_color
+		and	#$8F
+		ora	parameter_val
+		sta	text_color
+ignore		rts
+.endproc
+
+.proc decoration_attr				; SGR 51-55 framed/encircled/overlined - no VBXE support
+		rts
+.endproc
 
 .proc simple_attrib
 		lda	parameter_val
@@ -1188,13 +1244,17 @@ parse_parm
 		beq	bold
 		cmp	#$2
 		beq	unbold
+		cmp	#$3
+		beq	inverse			; italic aliased to inverse (no italic font on VBXE)
+		cmp	#$4
+		beq	noop			; underline - no VBXE support, swallow
 		cmp	#$5
 		beq	bold			; blink mapped to bold (no blink on VBXE)
 		cmp	#$6
 		beq	normal_int		; normal intensity (alias)
 		cmp	#$7
 		beq	inverse
-		rts
+noop		rts
 
 default_attr	lda	#$87
 		sta	text_color
@@ -1220,37 +1280,32 @@ inverse		lda	text_color
 		sta	text_color
 		rts
 .endproc
-		
-.proc forecolor_attr
+
+.proc reset_attrib				; SGR cancel codes (high BCD nibble = $20)
 		lda	parameter_val
-		cmp	#$38
-		bcs	ignore
 		and	#$0F
-		sta	parameter_val
-		lda	text_color
-		and	#$F8
-		ora	parameter_val
+		cmp	#$2
+		beq	un_bold			; 22 - normal intensity (clear bold)
+		cmp	#$3
+		beq	un_inverse		; 23 - italic off (italic is aliased to inverse)
+		cmp	#$4
+		beq	un_noop			; 24 - underline off (no VBXE underline)
+		cmp	#$5
+		beq	un_bold			; 25 - blink off (blink is aliased to bold)
+		cmp	#$7
+		beq	un_inverse		; 27 - inverse off (XOR self-cancels)
+		rts
+un_bold		lda	text_color
+		and	#%11110111
 		sta	text_color
-ignore		rts
-.endproc
-		
-.proc backcolor_attr
-		lda	parameter_val
-		cmp	#$48
-		bcs	ignore
-		and	#$0F
-		asl
-		asl
-		asl
-		asl
-		sta	parameter_val
-		lda	text_color
-		and	#$8F
-		ora	parameter_val
+		rts
+un_inverse	lda	text_color
+		eor	#%01110111
 		sta	text_color
-ignore		rts
+		rts
+un_noop		rts
 .endproc
-		
+
 .endproc					; end is_last_parm
 
 .endproc					; end SGR_adr
@@ -1598,11 +1653,6 @@ ct_done		jmp	cursor_on
 .endproc
 
 ;###################################################################################################################
-; EL - Erase in Line (ESC[nK)
-; n=0: clear from cursor to end of line (default)
-; currently only n=0 is supported
-
-;###################################################################################################################
 ; SCP - Save Cursor Position (ESC[s)
 
 .proc SCP_adr
@@ -1721,9 +1771,12 @@ scroll_loop	jsr	scroll_1d
 .endproc
 
 ;###################################################################################################################
-; SD - Scroll Down (ESC[nT) - scroll down not easily done with current blitter setup, so just ignore for now
+; SD - Scroll Down (ESC[nT) - stub
+; needs a reverse-direction blitter (or bank-switched CPU copy) since the screen
+; lives in VBXE-internal memory and the existing bcb_one_down only scrolls up.
+; rarely seen in practice; leave unimplemented until a feature pass adds it.
 
-SD_adr						; stub - not yet implemented
+SD_adr
 		rts
 
 ;###################################################################################################################
@@ -2609,7 +2662,7 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.11 (2026-05-03)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.12 (2026-05-03)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -3150,6 +3203,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.11.2026.05.03"
+version		.byte	"v0.12.2026.05.03"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

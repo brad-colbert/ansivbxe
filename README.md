@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.11  
+**Version:** v0.12  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -45,7 +45,7 @@ The FujiNet URL is constructed automatically. Backspace works at every field.
 | `$00` | NUL | No operation |
 | `$07` | BEL | Bell (ignored) |
 | `$08` | BS | Backspace — move cursor left |
-| `$09` | HT | Horizontal Tab (stub — no-op) |
+| `$09` | HT | Horizontal Tab — advance to next 8-column stop |
 | `$0A` | LF | Line Feed — also emits CR when LF-as-CRLF mode is on |
 | `$0B` | VT | Vertical Tab — treated as LF |
 | `$0C` | FF | Form Feed — clears screen, home cursor |
@@ -99,11 +99,18 @@ The FujiNet URL is constructed automatically. Backspace works at every field.
 | 0 | Reset all — white on black, normal intensity |
 | 1 | Bold / high intensity |
 | 2 | Normal intensity |
+| 3 | Italic (aliased to inverse video — VBXE has no italic font) |
+| 4 | Underline (acknowledged, no rendering — VBXE has no underline) |
 | 5 | Blink (rendered as bold/high intensity) |
 | 7 | Inverse video |
+| 22 | Normal intensity (cancel bold) |
+| 23 | Italic off (cancels the inverse alias) |
+| 24 | Underline off (no-op) |
+| 25 | Blink off (cancels the bold alias) |
 | 27 | Inverse off |
 | 30–37 | Foreground color (standard) |
 | 40–47 | Background color (standard) |
+| 51–55 | Framed / encircled / overlined and their cancels (acknowledged, no rendering) |
 | 90–97 | Foreground color (high intensity) |
 | 100–107 | Background color (high intensity) |
 
@@ -196,6 +203,14 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.12 — 2026-05-03
+- `HT` (Horizontal Tab, `$09`) now advances the cursor to the next 8-column stop instead of being a no-op
+- `SGR 3` (italic) is aliased to inverse video for visible feedback; `SGR 23` cancels it
+- `SGR 22 / 24 / 25 / 27` (cancel bold / underline / blink / inverse) now route correctly — they were silently dropped because the dispatcher's high-BCD-nibble routing had no entry for `$20`
+- `SGR 4` (underline) and `SGR 51 – 55` (framed / encircled / overlined) acknowledged as documented no-ops so the parser state can't drift
+- Refactored the SGR `is_last_parm` dispatch to long branches (`bne skip / jmp target / skip:`) so future additions don't hit the 6502's ±127-byte branch reach
+- `HTS` and `SD` stub comments rewritten to honestly describe why they remain unimplemented; orphaned `EL` header comment removed
 
 ### v0.11 — 2026-05-03
 - Fixed FujiNet SSH authentication on real hardware: the `$FE` password SIO call was missing a `DSTATS = $80` reset between it and the preceding `$FD` username call, so the OS sent the command frame with no transfer direction and the password buffer was never transmitted
