@@ -7,6 +7,18 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.13] - 2026-05-04
+
+### Fixed
+- ESC sequences with an intermediate byte (`$20–$2F`) — most commonly the VT100/VT220 character-set designators `ESC ( <c>`, `ESC ) <c>`, `ESC * <c>`, `ESC + <c>`, and `ESC # <c>` — leaked their final byte to the screen. Only the intermediate byte was consumed; the third byte fell through `process_char` with no flags set and was printed as text (e.g. `ESC ( @` rendered a stray `@`). The escape dispatcher now recognises intermediate bytes per ECMA-48 and sets a new "eat next byte" state on `ctrl_seq_flg` (bit 5) so the final byte is silently consumed.
+- DCS (`ESC P …`), SOS (`ESC X …`), OSC (`ESC ] …`), PM (`ESC ^ …`), and APC (`ESC _ …`) sequences leaked their entire body to the screen. The C1 introducers were stubbed as a shared `rts` with no state change, so every subsequent byte — title text, embedded CSI like `[3;52H`, and the terminator — printed as literal characters until something happened to look like a fresh ESC sequence. The five introducers now enter a "string mode" that consumes bytes silently until BEL (`$07`) or ST (`ESC \`).
+
+### Changed
+- `ctrl_seq_flg` (`$8B`) now uses bit 5 (eat-next-byte) and bit 4 (string mode) in addition to bits 7 (escape) and 6 (CSI).
+- `process_char` now leads with a single `LDA / BNE` on `ctrl_seq_flg` so the no-state hot path saves a cycle versus the previous `BIT / BVS / BPL` chain. The state-aware paths (escape, CSI, string mode) are reached via a follow-up `BIT` only when at least one flag bit is set.
+
+---
+
 ## [0.12] - 2026-05-03
 
 ### Added

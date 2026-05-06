@@ -82,7 +82,14 @@ src_ptr		= $85				; temporary source pointer on the zero page for memory moves
 dst_ptr		= $87				; same as above, but for destination
 counter		= $89				; byte counter for above
 
-ctrl_seq_flg	= $8B				; bit 7 indicates escape received, bit 6 indicates CSI received.
+ctrl_seq_flg	= $8B				; bit 7 indicates escape received, bit 6 indicates CSI received,
+						; bit 5 indicates "eat next byte" (final byte of an ESC + intermediate
+						; sequence such as ESC ( @ or ESC # 8). When bit 5 is paired with bit 7,
+						; the BIT dispatch in process_char routes through the escape branch.
+						; bit 4 indicates "string mode" — body of a DCS/SOS/OSC/PM/APC
+						; sequence; bytes are consumed until BEL ($07) or ST (ESC \).
+						; In string mode, bit 5 alongside bit 4 means the previous byte was
+						; ESC and the current byte is the ST final byte (consume + exit).
 
 cursor_flg	= $8C				; bit 7 indicates whether or not the cursor is currently visible
 						; that is, if it's a 1, then the color of the current character
@@ -841,22 +848,61 @@ n_recv_disconnect
 .endproc
 
 .proc process_char
-		bit	ctrl_seq_flg
-		bvs	is_ctrl_seq		; if overflow set, it's a control sequence
-		bpl	not_C1			; if escape flag not set, it's not a C1 character
-		lda	#0			; if it is, we clear the escape flag for the next character.
+		lda	ctrl_seq_flg		; fast path: no parser state, just print
+		bne	have_flags
+		jmp	not_C1
+have_flags	bit	ctrl_seq_flg
+		bvs	is_ctrl_seq		; bit 6: in CSI parameter parsing
+		bmi	in_esc_state		; bit 7: just received ESC (or eating the final byte after ESC + intermediate)
+		jmp	in_string_mode		; otherwise bit 4 is set: we're inside DCS/SOS/OSC/PM/APC body
+in_esc_state	lda	ctrl_seq_flg		; bit 5 set: we're eating the final byte of
+		and	#$20			; an ESC + intermediate sequence (e.g. ESC ( @)
+		bne	eat_final_byte		; — drop it silently
+		lda	#0			; otherwise clear escape flag for the next character
 		sta	ctrl_seq_flg
 		lda	temp_char
 		cmp	#$37			; ESC '7' = DECSC (save cursor)
 		beq	do_decsc
 		cmp	#$38			; ESC '8' = DECRC (restore cursor)
 		beq	do_decrc
-		and	#%11100000		; AND mask for C1 set
+		cmp	#$20			; below $20: control char after ESC, drop silently
+		bcc	check_C1
+		cmp	#$30			; $20–$2F: intermediate byte; eat the next byte too
+		bcs	check_C1
+		lda	#$A0			; keep escape flag (bit 7) and set eat-next flag (bit 5)
+		sta	ctrl_seq_flg
+		rts
+check_C1	and	#%11100000		; AND mask for C1 set
 		cmp	#$40			; if it's $40 after ANDing,
 		beq	is_C1			; it's part of the C1 set
 		rts				; otherwise, it's some other character preceded by escape, which we do nothing with (don't even print it)
+eat_final_byte	lda	#0
+		sta	ctrl_seq_flg
+		rts
 do_decsc	jmp	SCP_adr
 do_decrc	jmp	RCP_adr
+
+;-----------------------------------------------------------------------------
+; in_string_mode: we're inside a DCS/SOS/OSC/PM/APC body (bit 4 set in
+; ctrl_seq_flg). Eat bytes until BEL ($07) or ST (ESC \). Bit 5 paired with
+; bit 4 means the previous byte was ESC; the current byte is the ST final
+; (typically '\') and is consumed unconditionally to exit string mode.
+in_string_mode	lda	ctrl_seq_flg
+		and	#$20
+		bne	str_eat_final		; ESC seen previously: consume this byte and exit
+		lda	temp_char
+		cmp	#$07			; BEL terminates a string body
+		beq	str_end
+		cmp	#$1B			; ESC: ST final byte will follow
+		bne	str_eat			; any other byte: consume silently
+		lda	#$30			; bit 4 (still in string) + bit 5 (eat next byte)
+		sta	ctrl_seq_flg
+		rts
+str_eat		rts
+str_eat_final
+str_end		lda	#0
+		sta	ctrl_seq_flg
+		rts
 
 .proc is_ctrl_seq
 		lda	temp_char
@@ -1115,7 +1161,6 @@ PLU_adr
 RI_adr
 SS2_adr
 SS3_adr
-DCS_adr
 PU1_adr
 PU2_adr
 STS_adr
@@ -1123,12 +1168,20 @@ CCH_adr
 MW_adr
 SPA_adr
 EPA_adr
-SOS_adr
 SCI_adr
 ST_adr
+		rts
+
+; String-introducer C1 controls (DCS/SOS/OSC/PM/APC) start a body whose
+; contents must be consumed silently until BEL or ST (ESC \). Without this,
+; the body — which may contain things like '[3;52H' from an embedded CSI —
+; falls through to put_byte and prints as text. Enter string mode (bit 4).
+DCS_adr
+SOS_adr
 OSC_adr
 PM_adr
-APC_adr
+APC_adr		lda	#$10
+		sta	ctrl_seq_flg
 		rts
 .proc HT_adr					; Horizontal Tab: advance to next 8-column stop
 		jsr	cursor_off
