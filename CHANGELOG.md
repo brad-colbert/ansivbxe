@@ -7,6 +7,18 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.14] - 2026-05-05
+
+### Added
+- Curly braces `{` and `}` are now typeable via **CTRL+`<`** and **CTRL+`>`**. The Atari character set has no curly-brace keys, but VBXETERM renders the PC font that includes them — `{` and `}` were previously displayable from a remote host but unsendable from the keyboard. The two CTRL+`<`/`>` table slots (keycodes 182 and 183) were both unused (`0`), so no existing keyboard behavior is lost.
+- Arrow keys now send VT100/ANSI cursor escape sequences. CTRL+`-` / CTRL+`=` / CTRL+`+` / CTRL+`*` (UP / DOWN / LEFT / RIGHT — the symbols printed on the upper half of those Atari keys) now emit `ESC[A` / `ESC[B` / `ESC[D` / `ESC[C` instead of single C0 control characters. Bash readline history, `vim`/`vi` cursor motion, `less` paging, `mc` navigation, etc. now work as expected on remote hosts. Down-arrow previously sent no character at all.
+
+### Changed
+- `kbd_irq` gained a generic multi-byte sequence dispatch: `keycode_table` entries with bit 7 set are interpreted as indexes into a new `escape_seq` table (3 bytes per entry). Adding HOME / END / PAGE UP / PAGE DOWN / F-key bindings later is now a one-line append per key with no further IRQ changes. The dispatch checks for at least 3 free slots in the send FIFO before pushing so partial sequences are never queued (the whole keypress is dropped if the buffer can't hold it).
+- CTRL+SHIFT+`+` / `*` / `-` retain their existing FS / RS / US bindings (`$1C` / `$1E` / `$1F`) so those C0 control characters remain reachable from the keyboard for anyone who needs them.
+
+---
+
 ## [0.13] - 2026-05-04
 
 ### Fixed
