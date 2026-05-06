@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.12  
+**Version:** v0.14  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -35,6 +35,17 @@ Selecting `N` at the device prompt steps through:
 5. **PASSWORD** — password (SSH only, displayed as `*`)
 
 The FujiNet URL is constructed automatically. Backspace works at every field.
+
+### Keyboard
+
+Standard Atari keyboard, plus these terminal-specific bindings:
+
+| Key combo | Sends | Purpose |
+|-----------|-------|---------|
+| Arrow keys (CTRL+`-` / `=` / `+` / `*`) | `ESC[A` / `ESC[B` / `ESC[D` / `ESC[C` | VT100/ANSI cursor up / down / left / right — works in bash readline, vim, less, mc, etc. |
+| CTRL+`<` | `{` | Curly-brace entry. The Atari has no `{`/`}` keys, so these are mapped onto the otherwise-unused CTRL combos on the dedicated `<` and `>` keys (top row). |
+| CTRL+`>` | `}` | (see above) |
+| CTRL+SHIFT+`+` / `*` / `-` | FS / RS / US (`$1C` / `$1E` / `$1F`) | The C0 control characters that used to live on plain CTRL+`+` / `*` / `-`, relocated here when those keys became cursor arrows. |
 
 ### Supported ANSI/ECMA-48 Sequences
 
@@ -203,6 +214,12 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.14 — 2026-05-05
+- Curly braces `{` and `}` typeable via CTRL+`<` and CTRL+`>` (previously displayable from the host but unsendable from the keyboard)
+- Arrow keys (CTRL+`-` / `=` / `+` / `*`) now send VT100/ANSI cursor escape sequences (`ESC[A`/`B`/`D`/`C`) instead of single C0 control characters; bash readline, vim, less, mc, etc. now respond as expected. Down-arrow previously sent nothing at all.
+- New generic multi-byte escape-sequence dispatch in `kbd_irq` — adding HOME / END / PAGE UP / DOWN / F-keys later is a one-line table append per key
+- CTRL+SHIFT+`+` / `*` / `-` retain their FS / RS / US bindings so those C0 controls remain reachable
 
 ### v0.12 — 2026-05-03
 - `HT` (Horizontal Tab, `$09`) now advances the cursor to the next 8-column stop instead of being a no-op

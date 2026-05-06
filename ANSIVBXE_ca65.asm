@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.12
+;	Version: v0.14
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -2042,16 +2042,52 @@ new_key		txa
 ; return will produce CR I suppose. (for now only of course)
 
 		tax
-		lda	keycode_table,x		; get the ascii conversion (if there is one) from the table
-		beq	no_value		; if it's 0, then we don't do anything
+		lda	keycode_table,x		; get the action byte from the table
+		beq	no_value		; 0 means: do nothing
+		bmi	send_seq		; bit 7 set means: emit an escape sequence (see escape_seq table)
 
-		ldx	sendbufend		; get the current offset in the send FIFO
-		inx				; increment it
-		cpx	sendbufstart		; if it's now the same as this, then the buffer is actually full
-		beq	no_value		; we can't really do anything here, or else we'll cause a buffer overrun
-		stx	sendbufend		; but otherwise we're fine, so this becomes the new value
-		
-		sta	send_buffer,x		; and we can put the character into the buffer here
+		ldx	sendbufend		; single-byte path: get the current FIFO end
+		inx				; advance to next slot
+		cpx	sendbufstart		; if that equals start, the buffer is full
+		beq	no_value		; drop the keypress
+		stx	sendbufend		; commit new end
+		sta	send_buffer,x		; store the byte
+		jmp	no_value
+
+send_seq	and	#$7F			; A = sequence index (0..n)
+		sta	temp_key_char		; save N (adc can't add A to itself)
+		asl				; A = 2N
+		clc
+		adc	temp_key_char		; A = 3N = byte offset into escape_seq
+
+		pha				; save offset across the free-slot check
+		lda	sendbufstart		; compute free slots = (start - end - 1) mod 256
+		sec
+		sbc	sendbufend
+		sec
+		sbc	#1
+		cmp	#3
+		pla				; restore offset
+		bcc	no_value		; <3 free slots: drop the whole sequence (no partials)
+
+		tax				; X = source offset into escape_seq
+		tya				; preserve Y (IRQ caller doesn't save it for us)
+		pha
+		ldy	sendbufend
+		iny
+		lda	escape_seq,x
+		sta	send_buffer,y
+		iny
+		inx
+		lda	escape_seq,x
+		sta	send_buffer,y
+		iny
+		inx
+		lda	escape_seq,x
+		sta	send_buffer,y
+		sty	sendbufend
+		pla
+		tay
 
 no_value	lda	#$00			; key down, so reset ATRACT counter
 		sta	ATRACT			; not that it matters so much with VBXE, but it'll prevent changing border colors
@@ -2715,7 +2751,7 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.12 (2026-05-03)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.14 (2026-05-05)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -2983,6 +3019,17 @@ ctrl_seq_table
 		.byte	0			; this shows the end of the list.
 		
 ;###################################################################################################################
+; multi-byte escape sequences referenced from keycode_table.
+; A keycode_table entry with bit 7 set is treated as a sequence index N (low 7 bits);
+; kbd_irq emits the 3 bytes at escape_seq + 3*N. Add new sequences by appending here
+; and pointing the appropriate keycode_table entry at the corresponding $80+N value.
+
+escape_seq	.byte	$1B, '[', 'A'		; $80 - cursor up    (CTRL+- on Atari)
+		.byte	$1B, '[', 'B'		; $81 - cursor down  (CTRL+= on Atari)
+		.byte	$1B, '[', 'C'		; $82 - cursor right (CTRL+* on Atari)
+		.byte	$1B, '[', 'D'		; $83 - cursor left  (CTRL++ on Atari)
+
+;###################################################################################################################
 ; keycode to ASCII table
 ; zero means 'do nothing' for now
 ;		.byte	ascii-val		;key number - ascii mapping - atari key
@@ -3127,16 +3174,16 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	0			;131 - no key
 		.byte	0			;132 - no key
 		.byte	$B			;133 - VT - ctrl+k
-		.byte	$1C			;134 - FS - ctrl++ (ctrl+\)
-		.byte	$1E			;135 - RS - ctrl+* (ctrl+^)
+		.byte	$83			;134 - LEFT  - ctrl++ (was FS; FS still on ctrl+shift++)
+		.byte	$82			;135 - RIGHT - ctrl+* (was RS; RS still on ctrl+shift+*)
 		.byte	$F			;136 - SI - ctrl+o
 		.byte	0			;137 - no key
 		.byte	$10			;138 - DLE - ctrl+p
 		.byte	$15			;139 - NAK - ctrl+u
 		.byte	0			;140 - n/a - ctrl+return
 		.byte	$9			;141 - HT - ctrl+i
-		.byte	$1F			;142 - US - ctrl+- (ctrl+_)
-		.byte	0			;143 - n/a - ctrl+=
+		.byte	$80			;142 - UP    - ctrl+- (was US; US still on ctrl+shift+-)
+		.byte	$81			;143 - DOWN  - ctrl+=
 		.byte	$16			;144 - SYN - ctrl+v
 		.byte	0			;145 - n/a - ctrl+help
 		.byte	$3			;146 - ETX - ctrl+c
@@ -3175,8 +3222,8 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	0			;179 - n/a - ctrl+7
 		.byte	0			;180 - n/a - ctrl+BS
 		.byte	0			;181 - n/a - ctrl+8
-		.byte	0			;182 - n/a - ctrl+clear
-		.byte	0			;183 - n/a - ctrl+insert
+		.byte	$7B			;182 - { - ctrl+<
+		.byte	$7D			;183 - } - ctrl+>
 		.byte	$6			;184 - ACK - ctrl+f
 		.byte	$8			;185 - BS - ctrl+h
 		.byte	$4			;186 - EOT - ctrl+d
@@ -3256,6 +3303,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.12.2026.05.03"
+version		.byte	"v0.14.2026.05.05"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
