@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.14
+;	Version: v0.15
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -124,10 +124,11 @@ n_trip		= $9D				; PROCEED interrupt trip flag (0=idle, 1=FujiNet has data)
 lf_mode		= $9E				; LF-as-CRLF flag (0=LF only, 1=LF implies CR+LF)
 saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
 
-; OPTION-key popup menu state
-menu_active	= $A0				; 1 while a menu is open — kbd_irq diverts keys to menu_key
-menu_key	= $A1				; raw KBCODE captured by kbd_irq while menu_active
-menu_key_ready	= $A2				; 1 = menu_key holds a fresh key, cleared by menu_open after read
+; Settings menu state (used at device_select only — kbd_irq diverts keys
+; here while menu_active=1; we own VKEYBD for the duration of device_select).
+menu_active	= $A0				; 1 while menu mechanism is active
+menu_key	= $A1				; raw KBCODE captured by kbd_irq
+menu_key_ready	= $A2				; 1 = menu_key holds a fresh key
 
 SOUNDR		= $41				; OS SIO bus sound enable (0 = silent)
 
@@ -247,7 +248,7 @@ init_terminal_state
 ; device type: 0 = R:, 1 = N:
 		sta	device_type
 
-; menu popup state — A is still 0 here
+; Settings menu — start inert; device_select activates it for its lifetime
 		sta	menu_active
 		sta	menu_key_ready
 
@@ -337,49 +338,76 @@ device_select
 		ldx	#>select_prompt
 		jsr	print_str
 
-; make sure IOCB 2 is closed before we open K: on it
+; close IOCB 2 so its state is clean for choose_n / choose_r to (re)open K: later
 		ldx	#$20
 		lda	#$0C
 		sta	ICCOM+$20
 		jsr	CIOV
 
-; open K: on IOCB 2 for immediate (non-line-buffered) keyboard reads
-		ldx	#$20
-		lda	#$03			; CMD_OPEN
-		sta	ICCOM+$20
-		lda	#<kbd_dev
-		sta	ICBA+$20
-		lda	#>kbd_dev
-		sta	ICBA+$21
-		lda	#$04			; OREAD
-		sta	ICAX1+$20
-		lda	#$00
-		sta	ICAX2+$20
-		jsr	CIOV
-
-; read one key (K: returns immediately on key press, no Enter needed)
-		ldx	#$20
-		lda	#$07			; GET_CHARS
-		sta	ICCOM+$20
-		lda	#<select_buf
-		sta	ICBA+$20
-		lda	#>select_buf
-		sta	ICBA+$21
+; Install our kbd_irq for the duration of device_select. menu_active=1 makes
+; kbd_irq stash raw KBCODE into menu_key/menu_key_ready instead of trying to
+; queue into send_buffer. This lets us poll keypresses synchronously here AND
+; gives the settings menu (which expects menu_key/menu_key_ready) something to
+; read. The OS VKEYBD is restored before falling through to choose_n/choose_r
+; so the K: CIO calls that follow (read_line_vbxe etc.) work correctly.
+		sei
+		lda	#<kbd_irq
+		sta	VKEYBD
+		lda	#>kbd_irq
+		sta	VKEYBD+1
+		cli
 		lda	#$01
-		sta	ICBL+$20
+		sta	menu_active
 		lda	#$00
-		sta	ICBL+$21
-		jsr	CIOV
+		sta	menu_key_ready		; drop any stale key
 
-		lda	select_buf
+@select_loop
+		lda	CONSOL
+		and	#$04
+		bne	@check_key
+		; OPTION held — bring up the settings menu, then redraw
+		lda	#<main_menu
+		ldx	#>main_menu
+		jsr	menu_open
+		jmp	device_select		; full redraw after dismiss
+
+@check_key
+		lda	menu_key_ready
+		beq	@select_loop
+		ldx	menu_key
+		lda	#$00
+		sta	menu_key_ready
+		; X = raw KBCODE — translate via keycode_table to letter we can compare
+		lda	keycode_table,x
 		cmp	#'N'
-		beq	choose_n
+		beq	@go_n
 		cmp	#'n'
-		beq	choose_n
-;		cmp	#'Q'
-;		beq	choose_quit
-;		cmp	#'q'
-;		beq	choose_quit
+		beq	@go_n
+		cmp	#'R'
+		beq	@go_r
+		cmp	#'r'
+		beq	@go_r
+		jmp	@select_loop		; ignore other keys
+
+@go_n
+		jsr	uninstall_kbd_irq_for_select
+		jmp	choose_n
+
+@go_r
+		jsr	uninstall_kbd_irq_for_select
+		jmp	choose_r
+
+uninstall_kbd_irq_for_select
+		sei
+		lda	old_vkeybd
+		sta	VKEYBD
+		lda	old_vkeybd+1
+		sta	VKEYBD+1
+		cli
+		lda	#$00
+		sta	menu_active
+		sta	menu_key_ready
+		rts
 
 choose_r
 ; echo 'R' to VBXE, close K:, open R: serial device
@@ -664,16 +692,6 @@ device_open
 		sta	PACTL
 
 wait_for_byte	jsr	check_sendbuf
-; OPTION-key poll — bring up the popup menu when the user presses OPTION.
-; CONSOL bit 2 reads 0 while OPTION is held (active low); menu_open is fully
-; modal and only returns once the user dismisses the menu.
-		lda	CONSOL
-		and	#$04
-		bne	wfb_no_option
-		lda	#<main_menu
-		ldx	#>main_menu
-		jsr	menu_open
-wfb_no_option
 		lda	device_type
 		beq	r_do_recv		; R: — always poll
 		lda	n_trip			; N: — only recv when FujiNet has signalled data
@@ -2055,9 +2073,8 @@ new_key		txa
 		lda	KBCODE			; if it's not, then we need the keycode again
 		sta	CH1			; and we put it in here so we can check for bounce next time
 
-; If a menu is open, divert this key to the menu loop and skip the normal
-; keycode_table translation + sendbuf queueing. Stash raw KBCODE so the menu
-; can recognise arrow keys directly without going through the escape-seq path.
+; If menu mechanism is active (device_select context), divert raw KBCODE
+; to menu_key/menu_key_ready instead of translating into the send_buffer FIFO.
 		lda	menu_active
 		beq	@no_menu
 		lda	KBCODE
@@ -2402,22 +2419,25 @@ n_send		lda	#FUJI_ID
 ;###################################################################################################################
 ; OPTION-key popup menu
 ;
-; menu_open dispatches a self-contained modal menu. While a menu is open,
-; menu_active = 1 and kbd_irq routes raw KBCODEs into menu_key/menu_key_ready
-; instead of the send_buffer FIFO, so navigation keys do not leak to the
-; remote host. The N: receive loop is naturally paused — wait_for_byte does
-; not run until menu_open returns. The screen region under the menu is saved
-; into save_under_buf and restored byte-for-byte on dismissal.
+; menu_open dispatches a self-contained modal menu intended for use at the
+; device-selection screen, BEFORE any device is opened — so font loading via
+; CIO disk doesn't compete with R:'s concurrent SIO traffic. Caller must have
+; installed kbd_irq with menu_active=1 already (device_select does this); we
+; read keys by polling menu_key_ready, which kbd_irq sets to a raw KBCODE.
+; The screen region under the menu is saved into save_under_buf and restored
+; byte-for-byte on dismiss.
 ;
 ; Menu data layout (immutable, in CODE segment):
 ;   .byte row, col, width, height, item_count
 ;   per item: .word label_ptr (null-terminated), action_ptr (jsr-able)
 ;
-; ZP state ($A3-$AD) is loaded from the menu structure on entry.
+; ZP layout:
+;   $A0-$A2 = IRQ state (menu_active / menu_key / menu_key_ready) — owned by kbd_irq
+;   $A3-$AF = menu structure-loaded state, set up at menu_open entry
 ; Action procs may set menu_dismiss = 1 to tell the menu loop to exit
 ; immediately after the action returns (used by leaf actions like font load).
 
-; key codes recognised by the menu loop (raw KBCODE values)
+; Raw KBCODE values our kbd_irq diverts into menu_key while menu_active=1.
 KBCODE_RETURN	= 12
 KBCODE_ESC	= 28
 KBCODE_UP	= 142
@@ -2427,7 +2447,9 @@ KBCODE_DOWN	= 143
 MENU_COLOR_NORM	= $87				; white-on-black, overlay enabled (matches default text)
 MENU_COLOR_HILT	= $F0				; black-on-white (MENU_COLOR_NORM EOR $77)
 
-; menu state ZP cells (above the existing terminal state at $9F)
+; menu state ZP cells (above $A0-$A2 which hold the IRQ-state owned by kbd_irq:
+; menu_active / menu_key / menu_key_ready — those are equated near the top of
+; this file alongside the terminal state).
 menu_row	= $A3
 menu_col	= $A4
 menu_w		= $A5
@@ -2474,15 +2496,13 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		and	#$04
 		beq	@wait_release
 
-; mark menu as active so kbd_irq diverts keys to menu_key
-		lda	#$01
-		sta	menu_active
-
 ; snapshot the screen region we are about to overwrite, then draw
 		jsr	save_under_rect
 		jsr	menu_draw
 
-; main input loop — poll menu_key_ready (set by kbd_irq)
+; main input loop — poll menu_key_ready (set by kbd_irq while menu_active=1).
+; Caller (device_select) is responsible for installing kbd_irq with menu_active=1
+; before the menu opens, and restoring on the way out of the device-select screen.
 @loop
 		lda	menu_key_ready
 		beq	@loop
@@ -2526,8 +2546,7 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 @key_dismiss
 		jsr	restore_under_rect
 		lda	#$00
-		sta	menu_active
-; debounce ENTER/ESC release so caller's wait_for_byte loop doesn't see a stale key
+		sta	menu_key_ready		; drop stale dismiss key so device_select's poll doesn't see it
 		rts
 .endproc
 
@@ -2988,6 +3007,18 @@ save_under_buf	.res	960		; 40 cols × 12 rows × 2 bytes — covers any v1 menu
 		sta	ICAX2+$10
 		jsr	CIOV
 
+; fall through to configure_r_device for baud / translation / DTR / concurrent
+.endproc
+
+.proc configure_r_device
+; Re-issue the XIO settings needed to put R: into a known concurrent-I/O state.
+; Called once after OPEN at startup, AND again after any disk-driven CIO
+; (e.g. font load) — Atari OS SIO clobbers POKEY's serial port config (AUDCTL,
+; AUDF3/AUDF4, SKCTL) and clears POKMSK serial-IRQ bits 4-5 on every disk
+; transaction, leaving R: handler with the wrong baud divisors and disabled
+; serial IRQs.  Re-running these XIO commands re-applies the R: handler's
+; POKEY init via XIO 40, restoring R: to working order without close+reopen.
+
 ; 9600 baud, 8 data bits, no status line checking
 		ldx	#$10
 		lda	#36
@@ -3030,7 +3061,7 @@ save_under_buf	.res	960		; 40 cols × 12 rows × 2 bytes — covers any v1 menu
 		sta	ICAX2+$10
 		jsr	CIOV
 
-; start concurrent I/O
+; start concurrent I/O — re-applies POKEY init (AUDCTL, SKCTL, IRQEN bits 4-5)
 		ldx	#$10
 		lda	#40
 		sta	ICCOM+$10
@@ -3355,7 +3386,7 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.14 (2026-05-05)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.15 (2026-05-08)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -3907,6 +3938,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.14.2026.05.05"
+version		.byte	"v0.15.2026.05.08"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

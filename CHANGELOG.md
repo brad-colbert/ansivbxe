@@ -7,6 +7,21 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.15] - 2026-05-08
+
+### Added
+- **Settings menu at device select.** Pressing OPTION at the R/N prompt opens a popup menu where the user can pick a font before connecting. v1 ships with two choices — IBMPC and ATARIPC — but the framework is extensible: add an entry to `main_menu`, define a label string and a leaf action proc (do work → set `menu_dismiss = 1` → rts), and the new item shows up. Arrow keys navigate, ENTER selects, ESC dismisses. The screen content under the box is saved and restored byte-for-byte.
+- `_vbxe_load_font(path)` exported from `vbxe_lib`. Loads a 2 KB font file via CIO into VBXE font RAM at $0000 and restores the prior MEMAC bank, so it can be called with the screen overlay live without disturbing it. Uses **IOCB 3** so it never collides with R: device on IOCB 1 or with the K: synchronous-read path on IOCB 2.
+
+### Changed
+- `device_select` now installs `kbd_irq` (with `menu_active = 1`) for the duration of the prompt and polls `menu_key_ready` instead of doing a blocking `K: GET_CHARS`. This lets it detect OPTION (CONSOL bit 2) and letter keys (R/N) in the same loop. The OS VKEYBD vector is restored before falling through to `choose_n` or `choose_r` so the K: CIO calls in the FujiNet connection wizard continue to work unchanged.
+- `open_r_device` split into `open_r_device` (CIO open) + new `configure_r_device` (XIO 36/38/34/40). No behavior change at startup; the split exists so post-OPEN configuration can be re-applied later if needed (an earlier attempt to recover R: from disk-SIO POKEY clobber used this — left in place for future reuse).
+
+### Fixed
+- `kbd_irq` no longer translates every keypress to the letter `l`. The menu-divert check (`lda menu_active / beq @no_menu`) clobbers A before the `tax / lda keycode_table,x` lookup; reloading `KBCODE` into A at `@no_menu` before the `tax` restores correct behavior. Without this fix every keystroke routed through `keycode_table[0]` ($6C, ASCII 'l').
+
+---
+
 ## [0.14] - 2026-05-05
 
 ### Added
