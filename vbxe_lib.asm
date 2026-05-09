@@ -45,6 +45,7 @@ saved_sdmctl	= $9F		; SDMCTL saved by _vbxe_init, restored by _vbxe_shutdown
 
 	.export	_vbxe_init
 	.export	_vbxe_load_files
+	.export	_vbxe_load_font
 	.export	_vbxe_shutdown
 	.export	_vbxe_clear_ram
 
@@ -173,55 +174,13 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 		lda	(src_ptr),y		; xdl_size hi
 		sta	vl_xdl_sz+1
 
-		; ---- close IOCB 1 in case it is already open ----
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
-
-		; ---- open the font file on IOCB 1 ----
-		ldx	#$10
-		lda	#$03			; CMD_OPEN
-		sta	ICCOM+$10
-		lda	vl_font_ptr		; buffer address = pointer to path string
-		sta	ICBA+$10
-		lda	vl_font_ptr+1
-		sta	ICBA+$11
-		lda	#$04			; OREAD
-		sta	ICAX1+$10
-		lda	#$00
-		sta	ICAX2+$10
-		jsr	CIOV
-		bpl	@font_open_ok
+		; ---- load the font via the shared helper ----
+		lda	vl_font_ptr
+		ldx	vl_font_ptr+1
+		jsr	_vbxe_load_font
+		bne	@font_ok
 		jmp	@io_error
-@font_open_ok
-
-		; ---- set MEMAC bank 0 so $A000-$AFFF = VBXE $0000-$0FFF ----
-		lda	#$80
-		sta	memac_bank_sel
-
-		; ---- read the 2 K font into VBXE $0000 (CPU $A000) ----
-		ldx	#$10
-		lda	#$07			; CMD_GET_CHARS
-		sta	ICCOM+$10
-		lda	#$00			; buffer lo = $00 → address $A000
-		sta	ICBA+$10
-		lda	#>vbxe_mem_base		; buffer hi = $A0
-		sta	ICBA+$11
-		lda	#$00			; buffer length lo = 0 ($0800 = 2 K)
-		sta	ICBL+$10
-		lda	#$08			; buffer length hi = $08
-		sta	ICBL+$11
-		jsr	CIOV
-		bpl	@font_read_ok
-		jmp	@io_error
-@font_read_ok
-
-		; ---- close the font file ----
-		ldx	#$10
-		lda	#$0C
-		sta	ICCOM+$10
-		jsr	CIOV
+@font_ok
 
 		; ---- open the palette file on IOCB 1 ----
 		ldx	#$10
@@ -382,6 +341,109 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 @io_error
 		ldx	#0
 		lda	#0			; return failure (sets Z=1 for assembly BNE callers)
+		rts
+
+.endproc
+
+
+;======================================================================
+;
+;  int __fastcall__ vbxe_load_font (const char *path)
+;
+;  Open a font file via CIO IOCB 3, read up to 2 KB into VBXE font RAM
+;  at VBXE $0000 (= CPU $A000 with MEMAC bank 0 selected).  On entry the
+;  MEMAC window may be on any bank (e.g. display bank $FF after startup);
+;  this routine flips bank 0 in for the read and restores the previous
+;  bank before returning, so callers can swap fonts at runtime without
+;  disturbing the screen overlay.
+;
+;  Uses IOCB 3, NOT IOCB 1, because the runtime caller may be the live
+;  R: device which holds IOCB 1 in concurrent-I/O mode — touching IOCB 1
+;  here would tear down R: and hang the system.  IOCB 0 is reserved for
+;  E:, IOCB 2 is used for synchronous K: reads in the application.
+;
+;  On entry: A = lo byte of path pointer, X = hi byte.
+;  Returns: A=1, X=0 on success; A=0, X=0 on CIO error.
+;
+;======================================================================
+
+.proc _vbxe_load_font
+
+		; save path pointer
+		sta	vl_font_ptr
+		stx	vl_font_ptr+1
+
+		; remember the current MEMAC bank so we can restore it
+		lda	memac_bank_sel
+		pha
+
+		; close IOCB 3 in case it is already open
+		ldx	#$30
+		lda	#$0C
+		sta	ICCOM+$30
+		jsr	CIOV
+
+		; open the font file
+		ldx	#$30
+		lda	#$03			; CMD_OPEN
+		sta	ICCOM+$30
+		lda	vl_font_ptr
+		sta	ICBA+$30
+		lda	vl_font_ptr+1
+		sta	ICBA+$31
+		lda	#$04			; OREAD
+		sta	ICAX1+$30
+		lda	#$00
+		sta	ICAX2+$30
+		jsr	CIOV
+		bpl	@open_ok
+		jmp	@err
+
+@open_ok
+		; flip MEMAC to bank 0 so $A000-$A7FF = VBXE $0000-$07FF
+		lda	#$80
+		sta	memac_bank_sel
+
+		; read up to 2 KB into VBXE $0000 (CPU $A000)
+		ldx	#$30
+		lda	#$07			; CMD_GET_CHARS
+		sta	ICCOM+$30
+		lda	#$00
+		sta	ICBA+$30
+		lda	#>vbxe_mem_base
+		sta	ICBA+$31
+		lda	#$00
+		sta	ICBL+$30
+		lda	#$08			; 2 KB
+		sta	ICBL+$31
+		jsr	CIOV
+		bpl	@read_ok
+		; close on read error then fall to @err
+		ldx	#$30
+		lda	#$0C
+		sta	ICCOM+$30
+		jsr	CIOV
+		jmp	@err
+
+@read_ok
+		; close the font file
+		ldx	#$30
+		lda	#$0C
+		sta	ICCOM+$30
+		jsr	CIOV
+
+		; restore prior MEMAC bank
+		pla
+		sta	memac_bank_sel
+		ldx	#0
+		lda	#1
+		rts
+
+@err
+		pla
+		sta	memac_bank_sel
+		ldx	#0
+		lda	#0
 		rts
 
 .endproc

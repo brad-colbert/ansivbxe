@@ -53,7 +53,7 @@
 	.include "atarihardware_ca65.inc"	; general atari hardware equates,
 	.include "VBXE_ca65.inc"		; and VBXE equates
 
-	.import	_vbxe_init, _vbxe_load_files, _vbxe_shutdown
+	.import	_vbxe_init, _vbxe_load_files, _vbxe_load_font, _vbxe_shutdown
 
 ; VBXE equates
 vbxe_mem_base	= $A000				; If I put it here, it should be OK and it won't conflict with the extended RAM.
@@ -123,6 +123,11 @@ n_unit		= $9C				; FujiNet unit number (1–8), parsed from URL
 n_trip		= $9D				; PROCEED interrupt trip flag (0=idle, 1=FujiNet has data)
 lf_mode		= $9E				; LF-as-CRLF flag (0=LF only, 1=LF implies CR+LF)
 saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
+
+; OPTION-key popup menu state
+menu_active	= $A0				; 1 while a menu is open — kbd_irq diverts keys to menu_key
+menu_key	= $A1				; raw KBCODE captured by kbd_irq while menu_active
+menu_key_ready	= $A2				; 1 = menu_key holds a fresh key, cleared by menu_open after read
 
 SOUNDR		= $41				; OS SIO bus sound enable (0 = silent)
 
@@ -241,6 +246,10 @@ init_terminal_state
 
 ; device type: 0 = R:, 1 = N:
 		sta	device_type
+
+; menu popup state — A is still 0 here
+		sta	menu_active
+		sta	menu_key_ready
 
 ; Save OS vectors/PACTL once so exit_to_dos can always restore cleanly.
 		lda	VKEYBD
@@ -655,6 +664,16 @@ device_open
 		sta	PACTL
 
 wait_for_byte	jsr	check_sendbuf
+; OPTION-key poll — bring up the popup menu when the user presses OPTION.
+; CONSOL bit 2 reads 0 while OPTION is held (active low); menu_open is fully
+; modal and only returns once the user dismisses the menu.
+		lda	CONSOL
+		and	#$04
+		bne	wfb_no_option
+		lda	#<main_menu
+		ldx	#>main_menu
+		jsr	menu_open
+wfb_no_option
 		lda	device_type
 		beq	r_do_recv		; R: — always poll
 		lda	n_trip			; N: — only recv when FujiNet has signalled data
@@ -2036,11 +2055,24 @@ new_key		txa
 		lda	KBCODE			; if it's not, then we need the keycode again
 		sta	CH1			; and we put it in here so we can check for bounce next time
 
+; If a menu is open, divert this key to the menu loop and skip the normal
+; keycode_table translation + sendbuf queueing. Stash raw KBCODE so the menu
+; can recognise arrow keys directly without going through the escape-seq path.
+		lda	menu_active
+		beq	@no_menu
+		lda	KBCODE
+		sta	menu_key
+		lda	#$01
+		sta	menu_key_ready
+		jmp	no_value
+@no_menu
+
 ; I guess I will convert the key code to ASCII here, and interpret it, etc.
 ; I'll probably use an LUT
 ; for now, I guess I will just convert to ASCII and send. everything (for now) will become one character.
 ; return will produce CR I suppose. (for now only of course)
 
+		lda	KBCODE			; reload — A was clobbered by the menu_active check above
 		tax
 		lda	keycode_table,x		; get the action byte from the table
 		beq	no_value		; 0 means: do nothing
@@ -2366,7 +2398,579 @@ n_send		lda	#FUJI_ID
 		sta	DAUX2
 		jmp	SIOV
 .endproc
-		
+
+;###################################################################################################################
+; OPTION-key popup menu
+;
+; menu_open dispatches a self-contained modal menu. While a menu is open,
+; menu_active = 1 and kbd_irq routes raw KBCODEs into menu_key/menu_key_ready
+; instead of the send_buffer FIFO, so navigation keys do not leak to the
+; remote host. The N: receive loop is naturally paused — wait_for_byte does
+; not run until menu_open returns. The screen region under the menu is saved
+; into save_under_buf and restored byte-for-byte on dismissal.
+;
+; Menu data layout (immutable, in CODE segment):
+;   .byte row, col, width, height, item_count
+;   per item: .word label_ptr (null-terminated), action_ptr (jsr-able)
+;
+; ZP state ($A3-$AD) is loaded from the menu structure on entry.
+; Action procs may set menu_dismiss = 1 to tell the menu loop to exit
+; immediately after the action returns (used by leaf actions like font load).
+
+; key codes recognised by the menu loop (raw KBCODE values)
+KBCODE_RETURN	= 12
+KBCODE_ESC	= 28
+KBCODE_UP	= 142
+KBCODE_DOWN	= 143
+
+; menu cell color attributes
+MENU_COLOR_NORM	= $87				; white-on-black, overlay enabled (matches default text)
+MENU_COLOR_HILT	= $F0				; black-on-white (MENU_COLOR_NORM EOR $77)
+
+; menu state ZP cells (above the existing terminal state at $9F)
+menu_row	= $A3
+menu_col	= $A4
+menu_w		= $A5
+menu_h		= $A6
+menu_count	= $A7
+menu_selected	= $A8
+menu_dismiss	= $A9
+menu_ptr	= $AA				; 2 bytes — pointer to current menu structure
+menu_action	= $AC				; 2 bytes — pointer used for jsr (menu_action)
+ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must be ZP for indirect-Y)
+
+
+.proc menu_open
+; A = lo byte of menu structure, X = hi byte. Trashes most things.
+		sta	menu_ptr
+		stx	menu_ptr+1
+
+; load row/col/w/h/count from the structure header
+		ldy	#$00
+		lda	(menu_ptr),y
+		sta	menu_row
+		iny
+		lda	(menu_ptr),y
+		sta	menu_col
+		iny
+		lda	(menu_ptr),y
+		sta	menu_w
+		iny
+		lda	(menu_ptr),y
+		sta	menu_h
+		iny
+		lda	(menu_ptr),y
+		sta	menu_count
+
+		lda	#$00
+		sta	menu_selected
+		sta	menu_dismiss
+		sta	menu_key_ready		; drop any prior stale key
+
+; debounce: wait until OPTION is released before showing menu, otherwise
+; the user's still-held press would immediately re-trigger after dismiss.
+@wait_release
+		lda	CONSOL
+		and	#$04
+		beq	@wait_release
+
+; mark menu as active so kbd_irq diverts keys to menu_key
+		lda	#$01
+		sta	menu_active
+
+; snapshot the screen region we are about to overwrite, then draw
+		jsr	save_under_rect
+		jsr	menu_draw
+
+; main input loop — poll menu_key_ready (set by kbd_irq)
+@loop
+		lda	menu_key_ready
+		beq	@loop
+		ldx	menu_key
+		lda	#$00
+		sta	menu_key_ready
+
+		cpx	#KBCODE_UP
+		beq	@key_up
+		cpx	#KBCODE_DOWN
+		beq	@key_down
+		cpx	#KBCODE_RETURN
+		beq	@key_select
+		cpx	#KBCODE_ESC
+		beq	@key_dismiss
+		jmp	@loop			; ignore other keys
+
+@key_up
+		lda	menu_selected
+		beq	@loop			; already at top
+		dec	menu_selected
+		jsr	menu_redraw_items
+		jmp	@loop
+
+@key_down
+		lda	menu_selected
+		clc
+		adc	#$01
+		cmp	menu_count
+		bcs	@loop			; already at bottom
+		sta	menu_selected
+		jsr	menu_redraw_items
+		jmp	@loop
+
+@key_select
+		jsr	menu_invoke_action
+		lda	menu_dismiss
+		bne	@key_dismiss
+		jmp	@loop
+
+@key_dismiss
+		jsr	restore_under_rect
+		lda	#$00
+		sta	menu_active
+; debounce ENTER/ESC release so caller's wait_for_byte loop doesn't see a stale key
+		rts
+.endproc
+
+
+.proc menu_invoke_action
+; Look up action_ptr for menu_selected and JSR through it (so the action's
+; rts returns here, not to the caller of menu_open).
+; Per-item record is 4 bytes: label_lo, label_hi, action_lo, action_hi.
+; Records start at offset 5 (after the 5-byte header).
+		lda	menu_selected
+		asl
+		asl				; * 4 (record size)
+		clc
+		adc	#5			; skip header
+		tay
+		iny
+		iny				; advance past label_ptr to action_ptr
+		lda	(menu_ptr),y
+		sta	menu_action
+		iny
+		lda	(menu_ptr),y
+		sta	menu_action+1
+		jsr	@trampoline		; classic 6502 indirect-JSR via RTS-after-JMP
+		rts
+@trampoline
+		jmp	(menu_action)
+.endproc
+
+
+.proc save_under_rect
+; Copy menu_w * menu_h cells (2 bytes each) starting at (menu_row, menu_col)
+; into save_under_buf. Uses src_ptr/dst_ptr.
+		lda	menu_row
+		ldx	menu_col
+		jsr	menu_compute_addr	; → src_ptr
+
+		lda	#<save_under_buf
+		sta	dst_ptr
+		lda	#>save_under_buf
+		sta	dst_ptr+1
+
+		lda	menu_h
+		sta	su_rows_left
+
+@row
+		lda	menu_w
+		asl				; bytes per row = w * 2
+		sta	su_byte_count
+
+		ldy	#$00
+@cell
+		lda	(src_ptr),y
+		sta	(dst_ptr),y
+		iny
+		cpy	su_byte_count
+		bne	@cell
+
+; advance dst_ptr by su_byte_count
+		tya
+		clc
+		adc	dst_ptr
+		sta	dst_ptr
+		bcc	@dst_ok
+		inc	dst_ptr+1
+@dst_ok
+
+; advance src_ptr by 160 (full row stride)
+		lda	src_ptr
+		clc
+		adc	#160
+		sta	src_ptr
+		bcc	@src_ok
+		inc	src_ptr+1
+@src_ok
+
+		dec	su_rows_left
+		bne	@row
+		rts
+.endproc
+
+
+.proc restore_under_rect
+; Inverse of save_under_rect — copies save_under_buf back to (menu_row, menu_col).
+		lda	menu_row
+		ldx	menu_col
+		jsr	menu_compute_addr	; → src_ptr (used as DEST here)
+
+		lda	#<save_under_buf
+		sta	dst_ptr
+		lda	#>save_under_buf
+		sta	dst_ptr+1
+
+		lda	menu_h
+		sta	su_rows_left
+
+@row
+		lda	menu_w
+		asl
+		sta	su_byte_count
+
+		ldy	#$00
+@cell
+		lda	(dst_ptr),y		; dst_ptr = save buf (the "source" of restored bytes)
+		sta	(src_ptr),y		; src_ptr = screen (the destination)
+		iny
+		cpy	su_byte_count
+		bne	@cell
+
+		tya
+		clc
+		adc	dst_ptr
+		sta	dst_ptr
+		bcc	@dst_ok
+		inc	dst_ptr+1
+@dst_ok
+
+		lda	src_ptr
+		clc
+		adc	#160
+		sta	src_ptr
+		bcc	@src_ok
+		inc	src_ptr+1
+@src_ok
+
+		dec	su_rows_left
+		bne	@row
+		rts
+.endproc
+
+
+.proc menu_compute_addr
+; A = row, X = col → src_ptr = vbxe_screen_top + row*160 + col*2
+		sta	mc_row
+		stx	mc_col
+		lda	#<vbxe_screen_top
+		sta	src_ptr
+		lda	#>vbxe_screen_top
+		sta	src_ptr+1
+		ldx	mc_row
+		beq	@col_only
+@row_loop
+		lda	src_ptr
+		clc
+		adc	#160
+		sta	src_ptr
+		bcc	@no_carry
+		inc	src_ptr+1
+@no_carry
+		dex
+		bne	@row_loop
+@col_only
+		lda	mc_col
+		asl
+		clc
+		adc	src_ptr
+		sta	src_ptr
+		bcc	@done
+		inc	src_ptr+1
+@done
+		rts
+.endproc
+
+
+.proc menu_draw
+; Draw the box border, then all items.
+		jsr	menu_draw_box
+		jsr	menu_redraw_items
+		rts
+.endproc
+
+.proc menu_redraw_items
+; Redraw all menu items at their current positions, applying the highlight
+; to menu_selected. Cheap enough to redraw all rows on each highlight move.
+		lda	#$00
+		sta	mr_idx
+@item_loop
+		lda	mr_idx
+		cmp	menu_count
+		bcs	@done
+
+; compute row of this item: menu_row + 1 (for top border) + idx
+		lda	menu_row
+		clc
+		adc	#$01
+		clc
+		adc	mr_idx
+		sta	mr_row
+
+; compute label_ptr from menu_ptr + 5 + idx*4
+		lda	mr_idx
+		asl
+		asl
+		clc
+		adc	#5
+		tay
+		lda	(menu_ptr),y
+		sta	mr_label
+		iny
+		lda	(menu_ptr),y
+		sta	mr_label+1
+
+; choose color: highlight if idx == menu_selected
+		lda	mr_idx
+		cmp	menu_selected
+		beq	@hilite
+		lda	#MENU_COLOR_NORM
+		jmp	@have_color
+@hilite
+		lda	#MENU_COLOR_HILT
+@have_color
+		sta	mr_color
+
+; clear interior of this row first (col+1 .. col+w-2) with spaces
+		lda	mr_row
+		ldx	menu_col
+		inx				; skip left border
+		jsr	menu_compute_addr	; → src_ptr points to first interior cell
+		ldy	#$00
+		lda	menu_w
+		sec
+		sbc	#$02			; interior width = w - 2
+		sta	mr_inner_w
+@clear_loop
+		lda	#' '
+		sta	(src_ptr),y
+		iny
+		lda	mr_color
+		sta	(src_ptr),y
+		iny
+		dec	mr_inner_w
+		bne	@clear_loop
+
+; draw the label at col+2 (one space of padding inside the box)
+		lda	mr_row
+		ldx	menu_col
+		inx
+		inx				; left border + 1 pad
+		stx	mr_putcol
+		lda	mr_label
+		ldx	mr_label+1
+		ldy	mr_color
+		jsr	menu_put_str_at		; (label A/X, row→mr_row, col→mr_putcol, color Y)
+
+		inc	mr_idx
+		jmp	@item_loop
+@done
+		rts
+.endproc
+
+
+.proc menu_draw_box
+; Draw the box border using plain ASCII (+, -, |) so it renders identically
+; under any font we ship.
+		lda	menu_h
+		sta	mb_h_left
+
+		lda	menu_row
+		sta	mb_cur_row
+
+@row_loop
+		lda	mb_cur_row
+		ldx	menu_col
+		jsr	menu_compute_addr	; → src_ptr at left edge of this row
+
+; decide what kind of row this is: top, bottom, or middle
+		lda	mb_cur_row
+		cmp	menu_row
+		beq	@is_top
+		lda	mb_h_left
+		cmp	#$01
+		beq	@is_bottom
+		jmp	@is_middle
+
+@is_top
+		lda	#'+'
+		sta	mb_corner
+		lda	#'-'
+		sta	mb_fill
+		jmp	@draw
+
+@is_bottom
+		lda	#'+'
+		sta	mb_corner
+		lda	#'-'
+		sta	mb_fill
+		jmp	@draw
+
+@is_middle
+		lda	#'|'
+		sta	mb_corner
+		lda	#' '
+		sta	mb_fill
+		; fall through
+
+@draw
+		ldy	#$00
+		lda	menu_w
+		sta	mb_w_left
+
+; left edge cell
+		lda	mb_corner
+		sta	(src_ptr),y
+		iny
+		lda	#MENU_COLOR_NORM
+		sta	(src_ptr),y
+		iny
+		dec	mb_w_left
+
+; middle cells (w - 2 of them)
+		lda	mb_w_left
+		cmp	#$02
+		bcc	@right_edge
+@mid_loop
+		lda	mb_w_left
+		cmp	#$02
+		beq	@right_edge
+		lda	mb_fill
+		sta	(src_ptr),y
+		iny
+		lda	#MENU_COLOR_NORM
+		sta	(src_ptr),y
+		iny
+		dec	mb_w_left
+		jmp	@mid_loop
+
+@right_edge
+; right edge cell
+		lda	mb_corner
+		sta	(src_ptr),y
+		iny
+		lda	#MENU_COLOR_NORM
+		sta	(src_ptr),y
+
+		inc	mb_cur_row
+		dec	mb_h_left
+		beq	@all_done		; out-of-range to bne back; invert + jmp
+		jmp	@row_loop
+@all_done
+		rts
+.endproc
+
+
+.proc menu_put_str_at
+; A/X = pointer to null-terminated string, mr_row = row, mr_putcol = col,
+; Y on entry = color attribute byte.  Writes char + color cells to the
+; overlay.  src_ptr is advanced one cell (+2) per character; ps_str one
+; byte per character.  Y is held at 0 throughout for indirect-Y reads.
+		sta	ps_str
+		stx	ps_str+1
+		sty	ps_color
+
+		lda	mr_row
+		ldx	mr_putcol
+		jsr	menu_compute_addr	; → src_ptr (destination)
+
+@loop
+		ldy	#$00
+		lda	(ps_str),y
+		beq	@done
+		sta	(src_ptr),y		; char into cell low byte
+		iny
+		lda	ps_color
+		sta	(src_ptr),y		; color into cell high byte
+
+; advance src_ptr by 2 (next cell)
+		clc
+		lda	src_ptr
+		adc	#$02
+		sta	src_ptr
+		bcc	@no_dst_carry
+		inc	src_ptr+1
+@no_dst_carry
+
+; advance ps_str by 1 (next char)
+		inc	ps_str
+		bne	@loop
+		inc	ps_str+1
+		jmp	@loop
+@done
+		rts
+.endproc
+
+; --- menu actions (leaf — set menu_dismiss to close on completion) ---
+
+.proc font_load_ibm
+		lda	#<font_path_ibm
+		ldx	#>font_path_ibm
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_atari
+		lda	#<font_path_atari
+		ldx	#>font_path_atari
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+; --- menu data ---
+;
+; v1 is a flat menu; submenus would require either per-menu save buffers or
+; a stack-style allocator on save_under_buf to support nesting safely. When
+; future options are added (sound, local echo, force disconnect) just append
+; new entries here and bump the count + height — extending the menu is two
+; lines of data + an action proc.
+
+main_menu
+		.byte	8, 30, 18, 6, 2		; row, col, width, height, item count
+		.word	lbl_ibm,   font_load_ibm
+		.word	lbl_atari, font_load_atari
+
+lbl_ibm		.byte	"IBMPC font", 0
+lbl_atari	.byte	"ATARIPC font", 0
+
+font_path_ibm	.byte	"D:IBMPC.FNT", $9B
+font_path_atari	.byte	"D:ATARIPC.FNT", $9B
+
+; --- BSS-style scratch (zero-initialised at load) ---
+
+su_rows_left	.res	1
+su_byte_count	.res	1
+mc_row		.res	1
+mc_col		.res	1
+mr_idx		.res	1
+mr_row		.res	1
+mr_label	.res	2
+mr_color	.res	1
+mr_inner_w	.res	1
+mr_putcol	.res	1
+mb_h_left	.res	1
+mb_w_left	.res	1
+mb_cur_row	.res	1
+mb_corner	.res	1
+mb_fill		.res	1
+ps_color	.res	1
+save_under_buf	.res	960		; 40 cols × 12 rows × 2 bytes — covers any v1 menu
+
+;###################################################################################################################
+
 .proc open_r_device
 ; open and fully configure the R: serial device on IOCB 1.
 
@@ -2440,7 +3044,7 @@ n_send		lda	#FUJI_ID
 		jmp	CIOV
 .endproc
 
-font_path	.byte	"D:IBMPC.FNT", $9B
+font_path	.byte	"D:ATARIPC.FNT", $9B
 pallette_path	.byte	"D:ANSI.PAL", $9B
 ;test_file	.byte	"D:TEST.ANS", $9B
 r_path		.byte	"R1:", $9B
