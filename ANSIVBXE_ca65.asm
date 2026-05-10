@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.15
+;	Version: v0.16
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -2857,11 +2857,11 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 
 ; middle cells (w - 2 of them)
 		lda	mb_w_left
-		cmp	#$02
+		cmp	#$01
 		bcc	@right_edge
 @mid_loop
 		lda	mb_w_left
-		cmp	#$02
+		cmp	#$01
 		beq	@right_edge
 		lda	mb_fill
 		sta	(src_ptr),y
@@ -2949,6 +2949,105 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		rts
 .endproc
 
+.proc font_load_ascprin
+		lda	#<font_path_ascprin
+		ldx	#>font_path_ascprin
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_balloon
+		lda	#<font_path_balloon
+		ldx	#>font_path_balloon
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_bozo
+		lda	#<font_path_bozo
+		ldx	#>font_path_bozo
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_bzzz2
+		lda	#<font_path_bzzz2
+		ldx	#>font_path_bzzz2
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_casualgt
+		lda	#<font_path_casualgt
+		ldx	#>font_path_casualgt
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_computer
+		lda	#<font_path_computer
+		ldx	#>font_path_computer
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_cursive
+		lda	#<font_path_cursive
+		ldx	#>font_path_cursive
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_hero
+		lda	#<font_path_hero
+		ldx	#>font_path_hero
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_newsletter
+		lda	#<font_path_newsletter
+		ldx	#>font_path_newsletter
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_preppie
+		lda	#<font_path_preppie
+		ldx	#>font_path_preppie
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc font_load_shadow
+		lda	#<font_path_shadow
+		ldx	#>font_path_shadow
+		jsr	_vbxe_load_font
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
 ; --- menu data ---
 ;
 ; v1 is a flat menu; submenus would require either per-menu save buffers or
@@ -2958,15 +3057,48 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 ; lines of data + an action proc.
 
 main_menu
-		.byte	8, 30, 18, 6, 2		; row, col, width, height, item count
-		.word	lbl_ibm,   font_load_ibm
-		.word	lbl_atari, font_load_atari
+		.byte	8, 30, 18, 15, 13	; row, col, width, height, item count
+		.word	lbl_ibm,        font_load_ibm
+		.word	lbl_atari,      font_load_atari
+		.word	lbl_ascprin,    font_load_ascprin
+		.word	lbl_balloon,    font_load_balloon
+		.word	lbl_bozo,       font_load_bozo
+		.word	lbl_bzzz2,      font_load_bzzz2
+		.word	lbl_casualgt,   font_load_casualgt
+		.word	lbl_computer,   font_load_computer
+		.word	lbl_cursive,    font_load_cursive
+		.word	lbl_hero,       font_load_hero
+		.word	lbl_newsletter, font_load_newsletter
+		.word	lbl_preppie,    font_load_preppie
+		.word	lbl_shadow,     font_load_shadow
 
-lbl_ibm		.byte	"IBMPC font", 0
-lbl_atari	.byte	"ATARIPC font", 0
+lbl_ibm		.byte	"IBMPC", 0
+lbl_atari	.byte	"AtariPC", 0
+lbl_ascprin	.byte	"AscPrint", 0
+lbl_balloon	.byte	"Balloon", 0
+lbl_bozo	.byte	"Bozo", 0
+lbl_bzzz2	.byte	"Bzzz2", 0
+lbl_casualgt	.byte	"Casual GT", 0
+lbl_computer	.byte	"Computer", 0
+lbl_cursive	.byte	"Cursive", 0
+lbl_hero	.byte	"Hero", 0
+lbl_newsletter	.byte	"Newsletter", 0
+lbl_preppie	.byte	"Preppie", 0
+lbl_shadow	.byte	"Shadow", 0
 
-font_path_ibm	.byte	"D:IBMPC.FNT", $9B
-font_path_atari	.byte	"D:ATARIPC.FNT", $9B
+font_path_ibm		.byte	"D:IBMPC.FNT", $9B
+font_path_atari		.byte	"D:ATARIPC.FNT", $9B
+font_path_ascprin	.byte	"D:ASCPRINP.FNT", $9B
+font_path_balloon	.byte	"D:BALOONPC.FNT", $9B
+font_path_bozo		.byte	"D:BOZOPC.FNT", $9B
+font_path_bzzz2		.byte	"D:BZZZ2PC.FNT", $9B
+font_path_casualgt	.byte	"D:CASUALGT.FNT", $9B
+font_path_computer	.byte	"D:COMPUTPC.FNT", $9B
+font_path_cursive	.byte	"D:CURSIVEP.FNT", $9B
+font_path_hero		.byte	"D:HEROPC.FNT", $9B
+font_path_newsletter	.byte	"D:NEWSLTRP.FNT", $9B
+font_path_preppie	.byte	"D:PREPPIEP.FNT", $9B
+font_path_shadow	.byte	"D:SHADOWPC.FNT", $9B
 
 ; --- BSS-style scratch (zero-initialised at load) ---
 
@@ -3386,7 +3518,7 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.15 (2026-05-08)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.16 (2026-05-10)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -3938,6 +4070,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.15.2026.05.08"
+version		.byte	"v0.16.2026.05.10"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
