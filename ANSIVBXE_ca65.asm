@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.16
+;	Version: v0.17
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -692,7 +692,35 @@ device_open
 		sta	PACTL
 
 wait_for_byte	jsr	check_sendbuf
+		lda	CONSOL
+		and	#$04
+		bne	@no_option
+; OPTION held — open the settings menu. kbd_irq is already installed by
+; device_open for the session, but during normal terminal use menu_active=0 so
+; keys go to the send-buffer FIFO. Flip menu_active=1 around menu_open so its
+; modal loop sees menu_key_ready being set, then back to 0 so subsequent
+; typing resumes routing to the FIFO.
+;
+; On N: the full font menu works. On R: a font load triggers OS SIO which
+; clobbers POKEY's serial config and wedges the FujiNet R: handler in an
+; unrecoverable state — confirmed empirically (Phases 3-6 in plan history).
+; So when device_type == R:, we open a 1-item "blocked" info menu instead.
+		lda	#$01
+		sta	menu_active
+		lda	#$00
+		sta	menu_key_ready
 		lda	device_type
+		bne	@n_menu			; N: → main_menu (font selection)
+		lda	#<main_menu_r_blocked	; R: → blocked dialog
+		ldx	#>main_menu_r_blocked
+		jmp	@open
+@n_menu		lda	#<main_menu
+		ldx	#>main_menu
+@open		jsr	menu_open
+		lda	#$00
+		sta	menu_active
+		sta	menu_key_ready
+@no_option	lda	device_type
 		beq	r_do_recv		; R: — always poll
 		lda	n_trip			; N: — only recv when FujiNet has signalled data
 		beq	wait_for_byte
@@ -2930,122 +2958,122 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 .endproc
 
 ; --- menu actions (leaf — set menu_dismiss to close on completion) ---
+;
+; Each font_load_* proc loads a font from disk via _vbxe_load_font (IOCB 3),
+; then jumps to font_swap_done. The disk SIO inside _vbxe_load_font triggers
+; the OS SIOInitHardware path, which clobbers POKEY's serial-port config
+; (AUDCTL, AUDF3/AUDF4 baud divisors, SKCTL) and clears POKMSK serial-IRQ
+; bits 4-5 — fine for N: (request/response SIO), fatal for R: which holds
+; POKEY in concurrent-I/O mode. font_swap_done re-issues the R: configure
+; XIO sequence to revive POKEY when device_type == 0.
+
+.proc font_swap_done
+; Common dismiss tail for font_load_* actions. The in-session R: menu blocks
+; font selection up front (see wait_for_byte → main_menu_r_blocked) because
+; the disk SIO inside _vbxe_load_font wedges FujiNet R:'s handler unrecoverably,
+; so this proc is only ever reached from N: or from device_select (pre-connect).
+; Both contexts are safe — no recovery needed.
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
+
+.proc action_dismiss_only
+; Used by main_menu_r_blocked: ENTER just dismisses, no work.
+		lda	#$01
+		sta	menu_dismiss
+		rts
+.endproc
 
 .proc font_load_ibm
 		lda	#<font_path_ibm
 		ldx	#>font_path_ibm
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_atari
 		lda	#<font_path_atari
 		ldx	#>font_path_atari
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_ascprin
 		lda	#<font_path_ascprin
 		ldx	#>font_path_ascprin
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_balloon
 		lda	#<font_path_balloon
 		ldx	#>font_path_balloon
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_bozo
 		lda	#<font_path_bozo
 		ldx	#>font_path_bozo
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_bzzz2
 		lda	#<font_path_bzzz2
 		ldx	#>font_path_bzzz2
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_casualgt
 		lda	#<font_path_casualgt
 		ldx	#>font_path_casualgt
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_computer
 		lda	#<font_path_computer
 		ldx	#>font_path_computer
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_cursive
 		lda	#<font_path_cursive
 		ldx	#>font_path_cursive
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_hero
 		lda	#<font_path_hero
 		ldx	#>font_path_hero
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_newsletter
 		lda	#<font_path_newsletter
 		ldx	#>font_path_newsletter
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_preppie
 		lda	#<font_path_preppie
 		ldx	#>font_path_preppie
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 .proc font_load_shadow
 		lda	#<font_path_shadow
 		ldx	#>font_path_shadow
 		jsr	_vbxe_load_font
-		lda	#$01
-		sta	menu_dismiss
-		rts
+		jmp	font_swap_done
 .endproc
 
 ; --- menu data ---
@@ -3085,6 +3113,16 @@ lbl_hero	.byte	"Hero", 0
 lbl_newsletter	.byte	"Newsletter", 0
 lbl_preppie	.byte	"Preppie", 0
 lbl_shadow	.byte	"Shadow", 0
+
+; Blocked-menu shown when user presses OPTION while connected via R:.
+; A 1-item info popup; ENTER or ESC dismisses. Loading a font on R: would
+; clobber POKEY's serial config and wedge the FujiNet R: handler in an
+; unrecoverable state, so the menu doesn't even offer the choice.
+main_menu_r_blocked
+		.byte	10, 24, 32, 3, 1	; row, col, w, h, count (h = items + 2 borders)
+		.word	lbl_r_blocked,	action_dismiss_only
+
+lbl_r_blocked	.byte	"Disconnect to change fonts", 0
 
 font_path_ibm		.byte	"D:IBMPC.FNT", $9B
 font_path_atari		.byte	"D:ATARIPC.FNT", $9B
@@ -3518,7 +3556,7 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.16 (2026-05-10)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.17 (2026-05-10)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -4070,6 +4108,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.16.2026.05.10"
+version		.byte	"v0.17.2026.05.10"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
