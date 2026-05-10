@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.15  
+**Version:** v0.16  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -214,6 +214,12 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.16 — 2026-05-10
+- 11 additional fonts in the OPTION font menu (AscPrint, Balloon, Bozo, Bzzz2, Casual GT, Computer, Cursive, Hero, Newsletter, Preppie, Shadow); menu now lists 13 fonts total
+- Font-menu labels switched to compact mixed-case style ("IBMPC", "AtariPC", etc.) — dropped the " font" suffix
+- Fixed `menu_draw_box` off-by-one: right border was missing on item rows because the middle-cell loop wrote one cell short and the misplaced border was overwritten by the row clear
+- Fixed 5 font menu entries that silently failed to load — `dir2atr` truncates >8-char basenames to MyDOS 8.3, so the `font_path_*` strings needed the truncated names
 
 ### v0.14 — 2026-05-05
 - Curly braces `{` and `}` typeable via CTRL+`<` and CTRL+`>` (previously displayable from the host but unsendable from the keyboard)

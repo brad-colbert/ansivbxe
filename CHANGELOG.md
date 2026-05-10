@@ -7,6 +7,20 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.16] - 2026-05-10
+
+### Added
+- **11 additional fonts in the OPTION font menu.** AscPrint, Balloon, Bozo, Bzzz2, Casual GT, Computer, Cursive, Hero, Newsletter, Preppie, Shadow — all bundled in the ATR and selectable from the same OPTION-key popup that previously only offered IBMPC and ATARIPC. The menu now lists 13 fonts; the new entries are appended in alphabetical order beneath IBMPC + AtariPC so the cursor still defaults to IBMPC.
+
+### Changed
+- Font-menu label style: dropped the trailing " font" suffix and switched to compact mixed-case names ("IBMPC", "AtariPC", "AscPrint", etc.) so 13 rows fit cleanly in the 14-char interior width.
+
+### Fixed
+- `menu_draw_box` off-by-one in the middle-cell loop drew the right border one column too far left. On item rows the misplaced border landed inside `menu_redraw_items`'s row-clear range and was overwritten with a space, so the right `|` was invisible on every middle row. Top/bottom rows kept their misplaced `+` because they're never re-cleared. Loop exit condition (`cmp #$02` → `cmp #$01`) corrected; box now renders the full perimeter for any width. Bug existed in the v1 menu too — masked by the smaller box.
+- Five font menu entries (AscPrint, Casual GT, Cursive, Newsletter, Preppie) silently failed to load. Their source filenames in `disk/` exceed 8 chars; `dir2atr` silently truncates to MyDOS 8.3 (e.g. `ASCPRINPC.FNT` → `ASCPRINP.FNT`), but the asm `font_path_*` strings still requested the long names. Updated the 5 path strings to match the truncated 8-char names already on the ATR. The other 8 fonts have ≤8-char basenames and were unaffected.
+
+---
+
 ## [0.15] - 2026-05-08
 
 ### Added
