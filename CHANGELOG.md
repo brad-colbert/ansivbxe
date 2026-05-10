@@ -7,6 +7,25 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.17] - 2026-05-10
+
+### Added
+- **OPTION-key font menu now accessible mid-session.** Previously OPTION only opened the menu at the device-select prompt; once connected, the user had to disconnect to change fonts. The main `wait_for_byte` loop now polls `CONSOL` bit 2 each pass and opens the menu on demand. On N: (FujiNet) the full 13-font menu works without disrupting the connection — disk SIO during the font load is request/response on the SIO bus and doesn't interfere with N:'s own SIO traffic.
+
+### Changed
+- On R: connections, OPTION opens a one-line "Disconnect to change fonts" info dialog instead of the font menu. ENTER or ESC dismisses; no font swap is attempted. See *Known Limitation* below for the reason.
+
+### Known Limitation
+- **Font swap is unsupported on R: while connected.** The disk SIO inside `_vbxe_load_font` triggers the OS's `SIOInitHardware`, which clobbers POKEY's serial-port config (AUDCTL, AUDF3/AUDF4 baud divisors, SKCTL) and clears POKMSK serial-IRQ bits 4–5. Diagnostic snapshots (Altirra `.pokey` + IOCB/vector dumps) confirmed:
+  - VSERIN/VSEROR/VSEROC vectors at $020A–$020F are preserved through the disk SIO and still point to the FujiNet R: handler.
+  - IOCB 1 contents (handler ID, device, command, AUX) are preserved.
+  - POKEY hardware can be rewritten back to the working values byte-for-byte and POKMSK/IRQEN re-enabled — but R: still won't pass data.
+  - Any subsequent CIO call to attempt close+reopen recovery hangs in CIOV indefinitely; the FujiNet R: handler is in an unresponsive state from which no Atari-side action recovers.
+
+  Conclusion: the failure is internal to the FujiNet R: firmware's handling of an external POKEY clobber while concurrent mode is active. A fix would require firmware-side logic (detect POKEY clobber, re-init concurrent state). Until that lands, the menu blocks font selection on R: rather than silently breaking the connection.
+
+---
+
 ## [0.16] - 2026-05-10
 
 ### Added
