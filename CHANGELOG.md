@@ -7,6 +7,21 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.18] - 2026-05-10
+
+### Added
+- **Font menu now works on R: while connected.** v0.17 blocked OPTION on R: with a "Disconnect to change fonts" dialog because the disk SIO inside `_vbxe_load_font` would clobber POKEY's serial config and wedge the FujiNet R: handler unrecoverably. v0.18 wraps the font load with a pre-CLOSE + post-OPEN on IOCB 1, so the R: handler cleanly exits concurrent mode before the disk SIO and re-enters it afterward. Tested with active SSH session on FujiNet R: — the session survives the swap.
+
+### Changed
+- New `font_swap_prep_r` helper, called at the top of every `font_load_*` proc. On R:, issues `CMD_CLOSE` to IOCB 1 while the handler is still healthy — equivalent to the `NS_EndConcurrent` teardown sequence in the FujiNet netstream reference handler (disable POKEY serial IRQs, restore VSER* vectors, deassert motor line). No-op on N:, which is unaffected by interleaved disk SIO.
+- `font_swap_done` now re-opens IOCB 1 via `open_r_device` (→ `configure_r_device`) on R: to put the R: handler back into concurrent mode after the disk SIO completes. N: path is unchanged.
+- Removed `main_menu_r_blocked`, `lbl_r_blocked`, and `action_dismiss_only` — unreachable now that R: supports the full font menu.
+
+### Notes on the prior investigation (for posterity)
+- Earlier rounds (v0.17 development, Phases 3–6) tried to recover R: *after* the disk SIO had run, including: re-issuing `configure_r_device` (XIO 36/38/34/40), explicit POKMSK/IRQEN re-enable, direct POKEY hardware register write-back with the FujiNet R: working values (AUDCTL=$78, SKCTL=$73, AUDF1/3=$56), and post-disk-SIO close+reopen. POKEY could be made byte-perfect but R: stayed dead; the close+reopen hung in CIOV because the wedged R: handler never responded. **The unexplored angle was acting *before* the disk SIO while R: was still healthy** — that's what v0.18 implements. Lesson: concurrent-mode protocols need explicit enter/exit cooperation; restoring downstream hardware state isn't sufficient.
+
+---
+
 ## [0.17] - 2026-05-10
 
 ### Added
