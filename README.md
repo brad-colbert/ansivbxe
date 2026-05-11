@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.17  
+**Version:** v0.18  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -215,9 +215,12 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
+### v0.18 — 2026-05-10
+- Font menu now works on R: while connected (was blocked in v0.17). Wraps the font load with a pre-CLOSE + post-OPEN on IOCB 1 so the FujiNet R: handler cleanly exits concurrent mode before the disk SIO and re-enters it afterward. Tested with an active SSH session on FujiNet R: — the session survives the swap
+
 ### v0.17 — 2026-05-10
 - OPTION-key font menu now opens mid-session, not just at the device-select prompt. On N: connections the full font menu works without disrupting the FujiNet session
-- On R: connections OPTION opens a "Disconnect to change fonts" info dialog instead of the font menu. Font swap on R: while connected wedges the FujiNet R: handler unrecoverably (POKEY can be restored byte-for-byte from the Atari side but the handler's internal state remains stuck — confirmed via Altirra debugger snapshots). A fix would need to come from FujiNet R: firmware
+- On R: connections OPTION opens a "Disconnect to change fonts" info dialog instead of the font menu (superseded in v0.18)
 
 ### v0.16 — 2026-05-10
 - 11 additional fonts in the OPTION font menu (AscPrint, Balloon, Bozo, Bzzz2, Casual GT, Computer, Cursive, Hero, Newsletter, Preppie, Shadow); menu now lists 13 fonts total
