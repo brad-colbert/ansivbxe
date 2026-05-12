@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.18
+;	Version: v0.19
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -2466,6 +2466,14 @@ KBCODE_DOWN	= 143
 MENU_COLOR_NORM	= $87				; white-on-black, overlay enabled (matches default text)
 MENU_COLOR_HILT	= $F0				; black-on-white (MENU_COLOR_NORM EOR $77)
 
+; CP437 single-line box-drawing glyphs (depends on CP437-compatible font)
+BOX_UL		= 218				; upper-left  corner
+BOX_UR		= 191				; upper-right corner
+BOX_LL		= 192				; lower-left  corner
+BOX_LR		= 217				; lower-right corner
+BOX_VERT	= 179				; vertical edge
+BOX_HORZ	= 196				; horizontal edge
+
 ; menu state ZP cells (above $A0-$A2 which hold the IRQ-state owned by kbd_irq:
 ; menu_active / menu_key / menu_key_ready — those are equated near the top of
 ; this file alongside the terminal state).
@@ -2817,8 +2825,9 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 
 
 .proc menu_draw_box
-; Draw the box border using plain ASCII (+, -, |) so it renders identically
-; under any font we ship.
+; Draw the box border using CP437 single-line glyphs. Assumes the active
+; font follows the CP437 layout (true of every font shipped in fonts/ and
+; disk/). Stems use bit $10 / row 4, so corners and edges visually connect.
 		lda	menu_h
 		sta	mb_h_left
 
@@ -2840,22 +2849,27 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		jmp	@is_middle
 
 @is_top
-		lda	#'+'
+		lda	#BOX_UL
 		sta	mb_corner
-		lda	#'-'
+		lda	#BOX_UR
+		sta	mb_corner_r
+		lda	#BOX_HORZ
 		sta	mb_fill
 		jmp	@draw
 
 @is_bottom
-		lda	#'+'
+		lda	#BOX_LL
 		sta	mb_corner
-		lda	#'-'
+		lda	#BOX_LR
+		sta	mb_corner_r
+		lda	#BOX_HORZ
 		sta	mb_fill
 		jmp	@draw
 
 @is_middle
-		lda	#'|'
+		lda	#BOX_VERT
 		sta	mb_corner
+		sta	mb_corner_r
 		lda	#' '
 		sta	mb_fill
 		; fall through
@@ -2893,7 +2907,7 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 
 @right_edge
 ; right edge cell
-		lda	mb_corner
+		lda	mb_corner_r
 		sta	(src_ptr),y
 		iny
 		lda	#MENU_COLOR_NORM
@@ -3158,7 +3172,8 @@ mr_putcol	.res	1
 mb_h_left	.res	1
 mb_w_left	.res	1
 mb_cur_row	.res	1
-mb_corner	.res	1
+mb_corner	.res	1		; left-edge / left-corner glyph for current row
+mb_corner_r	.res	1		; right-edge / right-corner glyph for current row
 mb_fill		.res	1
 ps_color	.res	1
 save_under_buf	.res	960		; 40 cols × 12 rows × 2 bytes — covers any v1 menu
@@ -3561,7 +3576,7 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.18 (2026-05-10)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.19 (2026-05-11)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -4113,6 +4128,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.18.2026.05.10"
+version		.byte	"v0.19.2026.05.11"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

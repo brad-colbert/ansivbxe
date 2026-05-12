@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.18  
+**Version:** v0.19  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -214,6 +214,9 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.19 — 2026-05-11
+- Popup menu border now uses CP437 single-line box-drawing glyphs (`┌ ┐ └ ┘ ─ │`) instead of ASCII `+ - |`. Affects the OPTION-key font selector and the pre-terminal device-select menu. All 13 shipped fonts are CP437-compatible so the border renders cleanly under every one.
 
 ### v0.18 — 2026-05-10
 - Font menu now works on R: while connected (was blocked in v0.17). Wraps the font load with a pre-CLOSE + post-OPEN on IOCB 1 so the FujiNet R: handler cleanly exits concurrent mode before the disk SIO and re-enters it afterward. Tested with an active SSH session on FujiNet R: — the session survives the swap

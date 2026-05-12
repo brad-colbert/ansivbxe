@@ -7,6 +7,13 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.19] - 2026-05-11
+
+### Changed
+- **Popup menu border now uses CP437 single-line box-drawing glyphs.** The OPTION-key font selector and the pre-terminal device-select menu previously drew their border with plain ASCII `+`, `-`, `|`. With all 13 shipped fonts being CP437-compatible, `menu_draw_box` now uses `┌ ┐ └ ┘ ─ │` (218 / 191 / 192 / 217 / 196 / 179) for cleaner borders. Stems use bit `$10` and the horizontal sits at row 4, so corner/edge junctions are pixel-clean under every shipped font. New `BOX_*` equates and a sibling `mb_corner_r` zero-page byte split the previously-single corner glyph into left/right so top/bottom rows can use distinct corners (┌┐ vs └┘).
+
+---
+
 ## [0.18] - 2026-05-10
 
 ### Added
