@@ -328,6 +328,7 @@ device_select
 		lda	#$00			; move cursor to top-left
 		sta	row
 		sta	column
+		sta	dev_ready		; no device open at the selection gate (cold start / disconnect / menu dismiss)
 		jsr	recalc_cursor
 		lda	#<banner_msg
 		ldx	#>banner_msg
@@ -653,6 +654,9 @@ wait_for_return
 		jmp	device_select
 
 device_open
+; a device (R: or N:) is now open — enable the R: font-swap serial reconfigure
+		lda	#$01
+		sta	dev_ready
 ; flush any keystrokes buffered during device selection
 		lda	#$00
 		sta	sendbufstart
@@ -2979,6 +2983,8 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 ; is still healthy. Phase 6 attempted CLOSE *after* the disk SIO when the
 ; handler was already wedged and hung in CIOV — here we act before that
 ; happens. No-op on N:, which is unaffected by disk SIO interleaving.
+		lda	dev_ready
+		beq	@done			; no device open — skip the R: CLOSE entirely
 		lda	device_type
 		bne	@done
 		ldx	#$10
@@ -2993,6 +2999,8 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 ; falls through to configure_r_device for XIO 36/38/34/40). The R: handler
 ; goes through its full open + concurrent-mode setup, same as at boot.
 ; N: needs no recovery — never closed.
+		lda	dev_ready
+		beq	@dismiss		; no device open — just dismiss, no R: open/reconfigure
 		lda	device_type
 		bne	@dismiss
 		jsr	open_r_device
@@ -3576,7 +3584,8 @@ exit_to_dos
 
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.19 (2026-05-11)", $9B
+dev_ready	.res	1, $00				; 1 = a device (R:/N:) is open; gates R: font-swap serial I/O
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.20 (2026-07-07)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B

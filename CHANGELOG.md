@@ -7,6 +7,14 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.20] - 2026-07-07
+
+### Fixed
+- **Font selection no longer freezes when used before a device is selected.** Opening the OPTION font menu at the device-select screen (before choosing R: or N:) and picking a font could hang the machine. `device_type` defaults to `0` at cold start, which is indistinguishable from "R: selected", so `font_swap_done` ran the R: recovery path — `open_r_device` → `configure_r_device` (CIO OPEN "R1:" + XIO 36/38/34/40) — against an R: device that was never opened and may be absent, hanging in `CIOV` (no timeout, no status check). The same stale-`device_type == 0` window also occurs after an N: disconnect returns to `device_select`.
+- Added a `dev_ready` flag as a dedicated "a device is currently open" signal, set in the common `device_open` routine (reached only after a successful R: or N: open) and cleared at the top of `device_select` (cold start, every disconnect, and each menu dismiss). `font_swap_prep_r` and `font_swap_done` now gate their R: CLOSE/OPEN on `dev_ready`, so a font load with no device open only swaps VBXE font RAM — no serial I/O, no hang. Font previewing before connecting still works, and the in-session R:/N: swap behavior (v0.18) is unchanged.
+
+---
+
 ## [0.19] - 2026-05-11
 
 ### Changed
