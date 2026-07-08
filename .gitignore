@@ -1,0 +1,12 @@
+# Build output
+build/
+
+# Assembler / linker artifacts
+*.o
+*.lib
+*.map
+
+# Emitted binaries and disk images
+*.XEX
+*.ATR
+disk/ANSIVBXE.AR1
