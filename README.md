@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.19  
+**Version:** v0.20  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -214,6 +214,9 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.20 — 2026-07-07
+- Fixed a freeze when opening the OPTION font menu and selecting a font *before* a device (R:/N:) is chosen. `device_type` defaults to `0` (indistinguishable from "R: selected"), so the font swap ran the R: reopen/reconfigure against an R: device that was never opened and hung in `CIOV`. A new `dev_ready` flag now tracks whether a device is actually open, so pre-connection font loads only swap VBXE font RAM — no serial I/O, no hang. Font previewing before connecting still works; in-session R:/N: swap behavior is unchanged.
 
 ### v0.19 — 2026-05-11
 - Popup menu border now uses CP437 single-line box-drawing glyphs (`┌ ┐ └ ┘ ─ │`) instead of ASCII `+ - |`. Affects the OPTION-key font selector and the pre-terminal device-select menu. All 13 shipped fonts are CP437-compatible so the border renders cleanly under every one.
