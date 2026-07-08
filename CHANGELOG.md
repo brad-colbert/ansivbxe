@@ -7,6 +7,50 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.21] - 2026-07-07
+
+### Added
+- **IL — Insert Line (`ESC[nL`)** and **DL — Delete Line (`ESC[nM`)**. These are what fixes vim scrolling over an SSH session with `TERM=ansi`, which was the reported symptom: scrolling down worked, but moving the cursor up never inserted lines at the top.
+
+  The `ansi` terminfo entry has **no `csr`** (scrolling region) and **no `ri`** (reverse index), so vim cannot set a scroll region and instead emulates one with `il1`/`dl1`. Capturing vim's actual output under a real 80×24 pty confirms it: scrolling up past the top of the window emits `ESC[L` (18 emissions for 18 scroll events) and nothing else; `dd` emits `ESC[M`; `o` emits `ESC[L`. Scrolling *down* emits no control sequence at all — just LF — which is exactly why only the up direction was broken. Neither `ESC[T` nor `ESC M` is ever emitted under `TERM=ansi`.
+
+  Per xterm and the Linux console, IL and DL leave the cursor column alone. (Real DEC hardware homed it to the left margin; nothing modern does, and vim re-positions afterwards regardless.)
+
+- **SD — Scroll Down (`ESC[nT`, terminfo `rin`)** is now implemented. It had been a bare `rts` with a comment claiming it needed a reverse-direction blitter. It does not: the entire 80×24 screen is CPU-visible at `$A100-$AFFF` through the 4K MEMAC A window, so a plain backwards row copy suffices.
+
+- `scroll_rgn.inc` — shared CPU row-move primitives (`copy_row_fwd`, `blank_rows`, `scroll_rgn_up`, `scroll_rgn_down`) plus `row_addr_lo`/`row_addr_hi` lookup tables. Rows are always at least 160 bytes apart, so source and destination never overlap byte-wise; there is exactly one byte-copy loop, and the direction of the move is carried entirely by the row-pointer stride (`+160`/`-160`). Groundwork for a real DECSTBM scrolling region.
+
+- `make test` — a host-side unit test (`test/sim65/scroll_test.s`) that runs the *same* `scroll_rgn.inc` source under cc65's `sim65` 6502 simulator. 16 checks: full-screen up/down for n=1/3/23/24/99/255, a bounded region `[5,20]` verifying rows outside it never move, the degenerate one-row region (IL/DL with the cursor on the bottom margin), `blank_rows`, and the `X=0` guard. The fill pattern makes each cell's colour a function of both row *and* column, so a single dropped or misplaced byte anywhere in a row changes a sampled cell.
+
+- `test/scroll.sh` — visual companion to `test/smoke.sh` for eyeballing IL/DL/SU/SD boundaries over a live session.
+
+### Fixed
+- **`ED` (`ESC[J`, erase-in-display, mode 0) was off by one column.** It computed the cell count as `79 - column` where `EL` correctly uses `80 - column`. The last cell of the cursor's row was never erased, and with the cursor at column 79 the row was not touched at all. `ESC[J` is `ed` in the `ansi` terminfo and vim emits it constantly, so this left stray characters at the right edge independently of the scrolling bug.
+
+- **Private-parameter CSI sequences no longer reach public handlers.** `is_ctrl_seq` stores a leading `?` / `>` / `=` / `<` (`$3C-$3F`) as an ordinary parameter byte, so `ESC[>4;2m` (xterm `modifyOtherKeys`, which some ssh setups emit) was dispatching into `SGR_adr` with a garbage parameter list. `do_ctrl_seq` now swallows any sequence whose first parameter byte is in `$3C-$3F`. This is also a prerequisite for adding DECSTBM (`ESC[r`), since `ESC[?1049r` would otherwise reset the margins.
+
+### Changed
+- **The OS SIO bus sound (`SOUNDR`, `$41`) is now silenced for the duration of an N: session.** N: issues a raw `jsr SIOV` for every status poll, every read and every coalesced keystroke batch, so POKEY channel 4 — left audible while channels 3+4 clock the serial bit stream — whines continuously. `device_open` zeroes `SOUNDR` when `device_type` is N:; `device_select` restores it on the way back out (disconnect or menu dismiss), and `restore_os_hooks`/`reset_cleanup` already covered exit and RESET.
+
+  R: is deliberately left alone: it streams over CIO concurrent mode and never enters the OS SIO sound path.
+
+  Note that v0.19's changelog claimed this was already done. It wasn't — the write was committed already commented out (`cf3a698`, "Testing stoping SIO sound. I don't think it worked."), with a source comment blaming a suspected SSH breakage the commit message doesn't mention. Nothing in the codebase resets `SOUNDR` mid-session (`restore_os_hooks` runs only at exit), so the earlier attempt should have worked. It is scoped to N: now regardless.
+
+- `SU` (`ESC[nS`) now honours the scrolling region. With no margins set — the only case today — it still uses the `scroll_1d` blitter, which is roughly 20× faster than the CPU path and matters because terminfo `nel` is `\r\E[S`.
+- Removed `mem_move`, which was dead (`vbxe_lib.asm` carries its own private copy) and forward-only, so unusable for insert-line anyway.
+- Version strings reconciled: the source header said `v0.19`, the `version` string said `v0.19.2026.05.11`, and the banner said `v0.20`.
+
+### Notes on the implementation (for posterity)
+- `scroll_top`/`scroll_bot` and the row-copy pointers live at `$B0-$B5`, **not** `$A3-$A9`. `$A3-$AF` is the OPTION-menu state (`menu_row`…`ps_str`), and the menu is reachable mid-session, so anything parked there is clobbered the moment the user presses OPTION.
+- The row-copy pointers are `scr_src`/`scr_dst`, deliberately *not* `src_ptr`/`dst_ptr`/`counter`. `print_str` keeps its string pointer in `src_ptr` and `read_line_vbxe` keeps its buffer index in `counter`, both live across `jsr process_char` — which can reach a scroll. This was safe only because `scroll_1d` is a pure blitter that touches no zero page; a CPU memmove built on `src_ptr` would have corrupted both.
+- Blanked cells are filled with `text_color`, never `$00`: colour-byte bit 7 is the VBXE overlay opacity bit, so a `$00` colour renders the cell transparent rather than blank.
+
+### Still missing
+- No DECSTBM (`ESC[r`) scrolling region, and `ESC M` (RI) is still a no-op. Both are needed for `TERM=vt100` and `TERM=xterm`, which scroll with `csr`+`ri` rather than `il`/`dl` and are considerably more efficient over SIO. `ESC D` (IND) also still routes through `LF_adr` and so wrongly honours `lf_mode`, doing CR+LF instead of a bare index.
+- `ICH` (`ESC[n@`), `DCH` (`ESC[nP`), `ECH` (`ESC[nX`) and `VPA` (`ESC[nd`) remain unimplemented. The `ansi` terminfo advertises all four, but the pty capture shows vim never emits any of them — it redraws the line instead.
+
+---
+
 ## [0.20] - 2026-07-07
 
 ### Fixed
@@ -142,7 +186,7 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
   - Keyboard sends are now coalesced into a single SIO write (up to 64 bytes per call) instead of one SIO transaction per byte. Paste and burst typing are noticeably faster.
   - Queued keystrokes are flushed every 32 received bytes during inbound rendering, so typing remains responsive while large server bursts are still drawing to the screen.
   - PROCEED interrupt is cleared and re-armed at the start of the receive routine instead of after the batch finishes rendering, so back-to-back inbound bursts no longer have a render-time gap.
-- OS SIO bus sound (`SOUNDR`) is silenced for the duration of the session and restored on exit, so the per-byte click/whine no longer plays during FujiNet traffic.
+- OS SIO bus sound (`SOUNDR`) is silenced for the duration of the session and restored on exit, so the per-byte click/whine no longer plays during FujiNet traffic. **(Correction, v0.21: this never actually shipped — the `sta SOUNDR` was committed commented out. It is live as of v0.21, scoped to N: sessions.)**
 
 ---
 

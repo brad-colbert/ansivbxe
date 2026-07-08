@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.19
+;	Version: v0.21
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -129,6 +129,19 @@ saved_sdmctl	= $9F				; SDMCTL value saved at startup, restored on exit
 menu_active	= $A0				; 1 while menu mechanism is active
 menu_key	= $A1				; raw KBCODE captured by kbd_irq
 menu_key_ready	= $A2				; 1 = menu_key holds a fresh key
+						; NOTE: $A3-$AF are menu_row..ps_str (see near menu_open).
+						; The OPTION menu is reachable mid-session, so nothing that
+						; must survive a menu invocation may live in $A3-$AF.
+
+; Scrolling-region state and scratch for the CPU row-move primitives.
+; Deliberately above the menu block: scroll_top/scroll_bot must survive an OPTION menu.
+; scr_src/scr_dst must NOT reuse src_ptr/dst_ptr/counter: print_str keeps its string
+; pointer in src_ptr, and read_line_vbxe keeps its buffer index in counter, both live
+; across jsr process_char — which can reach a scroll.
+scroll_top	= $B0				; 0-based top row of the DECSTBM region (default 0)
+scroll_bot	= $B1				; 0-based bottom row of the DECSTBM region (default 23)
+scr_src		= $B2				; 2 bytes — row-copy source, scroll primitives only
+scr_dst		= $B4				; 2 bytes — row-copy destination / blank target
 
 SOUNDR		= $41				; OS SIO bus sound enable (0 = silent)
 
@@ -274,17 +287,18 @@ init_terminal_state
 		lda	#>reset_cleanup
 		sta	DOSINI+1
 
-; Silence the OS SIO bus sound (the per-byte click/whine) for the duration of the session.
-; TEMPORARILY DISABLED 2026-05-02 — investigating whether SOUNDR=0 was breaking SSH connections.
-; Save/restore plumbing kept in place; just skipping the actual silence write for now.
+; Remember the OS SIO bus sound setting. The actual silencing is done per-device in
+; device_open (N: only) and undone in device_select, so an R: session is left alone.
+; restore_os_hooks and reset_cleanup both put this value back on the way out.
 		lda	SOUNDR
 		sta	saved_soundr
-;		lda	#$00
-;		sta	SOUNDR
 
 ; LF-as-CRLF mode: default on (most hosts send bare LF expecting terminal to add CR)
 		lda	#$01
 		sta	lf_mode
+
+		jsr	reset_margins		; scrolling region starts as the full screen
+
 		lda	#$00
 
 ; turn the cursor on
@@ -329,6 +343,9 @@ device_select
 		sta	row
 		sta	column
 		sta	dev_ready		; no device open at the selection gate (cold start / disconnect / menu dismiss)
+		jsr	reset_margins		; a new session must not inherit a stale scrolling region
+		lda	saved_soundr		; an N: session silences the SIO bus sound; put it back
+		sta	SOUNDR			; (no-op at cold start, where saved_soundr was just read)
 		jsr	recalc_cursor
 		lda	#<banner_msg
 		ldx	#>banner_msg
@@ -657,6 +674,19 @@ device_open
 ; a device (R: or N:) is now open — enable the R: font-swap serial reconfigure
 		lda	#$01
 		sta	dev_ready
+
+; N: drives a raw SIO transaction (jsr SIOV) for every status poll, every read and every
+; coalesced keystroke batch, so the OS SIO bus sound — POKEY channel 4 left audible while
+; channels 3+4 clock the serial bit stream — whines continuously. Silence it for the life
+; of the N: session. R: streams over CIO concurrent mode and never enters the OS SIO sound
+; path, so leave its setting untouched. device_select restores saved_soundr on the way out
+; (disconnect, menu dismiss); restore_os_hooks and reset_cleanup cover exit and RESET.
+		lda	device_type
+		beq	keep_sio_sound		; 0 = R:
+		lda	#$00
+		sta	SOUNDR
+keep_sio_sound
+
 ; flush any keystrokes buffered during device selection
 		lda	#$00
 		sta	sendbufstart
@@ -1027,7 +1057,12 @@ jump_C1		jmp	$0000
 		bcs	find_entry		; $30+ is a parameter byte, not intermediate
 		sta	inter_byte
 
-find_entry	ldx	#0
+find_entry	lda	ctrl_seq_buf		; a leading $3C-$3F ('<' '=' '>' '?') marks a private
+		cmp	#$3C			; parameter string: ESC[?25l, ESC[?1049h, ESC[>4;2m ...
+		bcc	scan_table		; none of which we implement. Swallow them rather than
+		cmp	#$40			; let them fall into a public handler with a bogus
+		bcc	last_entry		; parameter list (ESC[?1;5r would reset the margins).
+scan_table	ldx	#0
 next_entry	lda	ctrl_seq_table,x	; get final byte from table
 		beq	last_entry		; if the last entry is reached, jump
 		cmp	final_byte		; compare to actual final byte
@@ -1656,10 +1691,10 @@ clear_from_cursor				; n=0: clear from cursor to end of screen
 		sec
 		sbc	row			; rows remaining below cursor row
 		sta	counter+1		; use as outer loop count
-		lda	#79
-		sec
-		sbc	column			; chars remaining on current line
-		tax
+		lda	#80			; NOT #79: the count is inclusive of the cursor cell,
+		sec				; exactly as EL_adr does. With #79 this left column 79
+		sbc	column			; unerased, and erased nothing at all at column 79.
+		tax				; chars remaining on current line, >= 1
 		beq	skip_first_line
 		ldy	#0
 cf_loop1	lda	#0
@@ -1867,30 +1902,117 @@ col_ok		sta	column
 .endproc
 
 ;###################################################################################################################
-; SU - Scroll Up (ESC[nS) - scroll display up by n lines (default 1)
+; param1: X = index into ctrl_seq_buf on entry. Returns A = parameter value, minimum 1
+; (an absent or zero parameter means 1 for every sequence that uses this helper).
+; Leaves X on the first non-digit, exactly like parse_param.
+
+.proc param1
+		jsr	parse_param
+		bne	got_param
+		lda	#1
+got_param	rts
+.endproc
+
+;###################################################################################################################
+; SU - Scroll Up (ESC[nS) - scroll region up by n lines (default 1). terminfo: indn, nel
 
 .proc SU_adr
 		ldx	#0
-		jsr	parse_param
-		tay
-		bne	has_param
-		ldy	#1
-has_param
+		jsr	param1
+		sta	sr_n
 		jsr	cursor_off
-scroll_loop	jsr	scroll_1d
+
+		lda	scroll_top		; no margins set? the blitter is ~20x faster,
+		bne	use_cpu			; and nel (\r\E[S) can be on the hot path
+		lda	scroll_bot
+		cmp	#23
+		bne	use_cpu
+		ldy	sr_n
+blit_loop	jsr	scroll_1d
 		dey
-		bne	scroll_loop
+		bne	blit_loop
+		jmp	cursor_on
+
+use_cpu		ldy	sr_n
+		lda	scroll_top
+		ldx	scroll_bot
+		jsr	scroll_rgn_up
 		jmp	cursor_on
 .endproc
 
 ;###################################################################################################################
-; SD - Scroll Down (ESC[nT) - stub
-; needs a reverse-direction blitter (or bank-switched CPU copy) since the screen
-; lives in VBXE-internal memory and the existing bcb_one_down only scrolls up.
-; rarely seen in practice; leave unimplemented until a feature pass adds it.
+; SD - Scroll Down (ESC[nT) - scroll region down by n lines (default 1). terminfo: rin
+; Cursor does not move. Was a bare rts until the CPU row-move primitives landed.
 
-SD_adr
-		rts
+.proc SD_adr
+		ldx	#0
+		jsr	param1
+		tay
+		jsr	cursor_off
+		lda	scroll_top
+		ldx	scroll_bot
+		jsr	scroll_rgn_down
+		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; IL - Insert Line (ESC[nL) - open n blank lines at the cursor row, pushing the rest of
+; the region down; lines pushed past the bottom margin are lost. terminfo: il1, il
+;
+; This is the sequence vim emits to scroll up under TERM=ansi (which has no csr and no
+; ri, so vim emulates a scrolling region with il1/dl1). It is also what `o` emits.
+;
+; The cursor does not move — not even to column 0. xterm and the Linux console both
+; leave the column alone here; only real DEC hardware homed it to the left margin.
+
+.proc IL_adr
+		ldx	#0
+		jsr	param1
+		sta	sr_n
+
+		lda	row			; ignore entirely if the cursor is outside the region
+		cmp	scroll_top
+		bcc	bail
+		lda	scroll_bot
+		cmp	row
+		bcc	bail			; scroll_bot < row
+
+		jsr	cursor_off		; nothing may rts between cursor_off and cursor_on
+		ldy	sr_n
+		lda	row			; effective top of the scroll = the cursor row
+		ldx	scroll_bot
+		jsr	scroll_rgn_down
+		jmp	cursor_on		; row/column/cursor_address all unchanged
+bail		rts
+.endproc
+
+;###################################################################################################################
+; DL - Delete Line (ESC[nM) - delete n lines at the cursor row, pulling the rest of the
+; region up and blanking the bottom n rows. terminfo: dl1, dl. This is what `dd` emits.
+;
+; IL/DL with the cursor on the bottom margin degenerate to "blank that one row", which
+; scroll_rgn_up/down already handle via their blank_all path. No special case needed.
+
+.proc DL_adr
+		ldx	#0
+		jsr	param1
+		sta	sr_n
+
+		lda	row
+		cmp	scroll_top
+		bcc	bail
+		lda	scroll_bot
+		cmp	row
+		bcc	bail
+
+		jsr	cursor_off
+		ldy	sr_n
+		lda	row
+		ldx	scroll_bot
+		jsr	scroll_rgn_up
+		jmp	cursor_on
+bail		rts
+.endproc
 
 ;###################################################################################################################
 ; EL - Erase in Line (ESC[nK)
@@ -1973,27 +2095,11 @@ cw_loop		lda	#0
 		jmp	cursor_on
 .endproc
 		
-.proc mem_move					; memory move routine.
-; copies number of bytes in counter + 1 from address in src_ptr to address in dst_ptr
+;###################################################################################################################
+; CPU row-move primitives for the scrolling region (IL/DL/SD/SU/RI) plus the row_addr
+; lookup tables. Shared verbatim with the host-side sim65 unit test — see test/sim65/.
 
-		ldy	#0			; we don't want an offset actually, but the 6502 uses one anyway
-loop		lda	(src_ptr),y		; move a byte
-		sta	(dst_ptr),y
-		inc	src_ptr			; increment the pointer
-		bne	no_carry_0		; if it rolled over (to zero)
-		inc	src_ptr+1		; then increment the high byte
-no_carry_0	inc	dst_ptr			; increment the other pointer
-		bne	no_carry_1
-		inc	dst_ptr+1
-no_carry_1	lda	counter			; check to see if count is 0
-		bne	no_borrow		; if it's not, we don't borrow
-		lda	counter+1		; check to see if count's high byte is 0 also
-		beq	done			; in which case we're done
-		dec	counter+1		; but if we're not, we borrow
-no_borrow	dec	counter
-		jmp	loop
-done		rts
-.endproc
+	.include "scroll_rgn.inc"
 
 .proc scroll_1d					; scroll one down routine.
 ; uses the blitter to move everything up just one line.
@@ -3167,6 +3273,10 @@ font_path_shadow	.byte	"D:SHADOWPC.FNT", $9B
 
 ; --- BSS-style scratch (zero-initialised at load) ---
 
+sr_top		.res	1		; scroll_rgn_* effective top row
+sr_bot		.res	1		; scroll_rgn_* effective bottom row
+sr_n		.res	1		; scroll_rgn_* line count
+sr_rows		.res	1		; rows remaining in the row-move loop
 su_rows_left	.res	1
 su_byte_count	.res	1
 mc_row		.res	1
@@ -3585,7 +3695,7 @@ exit_to_dos
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
 dev_ready	.res	1, $00				; 1 = a device (R:/N:) is open; gates R: font-swap serial I/O
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.20 (2026-07-07)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.21 (2026-07-07)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -3828,6 +3938,10 @@ ctrl_seq_table
 		.word	CUB_adr			; cursor back (left)
 		.byte	'H', 0
 		.word	CUP_adr			; cursor position
+		.byte	'L', 0
+		.word	IL_adr			; insert line  (hot: vim scrolls up with this)
+		.byte	'M', 0
+		.word	DL_adr			; delete line  (hot: vim's dd)
 		.byte	'f', 0
 		.word	HVP_adr			; horizontal/vertical position (alias for CUP)
 		.byte	'J', 0
@@ -4137,6 +4251,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.19.2026.05.11"
+version		.byte	"v0.21.2026.07.07"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

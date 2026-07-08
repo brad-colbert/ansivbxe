@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.20  
+**Version:** v0.21  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -16,6 +16,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 - 256-character IBM CGA-style font
 - Editable ANSI color palette (16 colors: 8 standard + 8 high-intensity)
 - LF-as-CRLF mode enabled by default (compatible with most remote hosts)
+- OS SIO bus sound silenced during FujiNet N: sessions (no per-byte whine), restored on disconnect and exit
 - Step-by-step connection wizard — no manual URL construction required
 - R: serial device or FujiNet N: device (Telnet or SSH)
 - FujiNet SSH username and password entry (with asterisk masking)
@@ -94,14 +95,24 @@ Standard Atari keyboard, plus these terminal-specific bindings:
 | `ESC[r;cf` | HVP | Horizontal/Vertical Position — alias for CUP |
 | `ESC[nJ` | ED | Erase in Display: 0=cursor→end, 1=start→cursor, 2=whole screen |
 | `ESC[nK` | EL | Erase in Line: 0=cursor→EOL, 1=start→cursor, 2=whole line |
+| `ESC[nL` | IL | Insert _n_ blank lines at the cursor row, pushing the rest down (default 1). Cursor column unchanged |
+| `ESC[nM` | DL | Delete _n_ lines at the cursor row, pulling the rest up (default 1). Cursor column unchanged |
 | `ESC[nS` | SU | Scroll Up _n_ lines (default 1) |
-| `ESC[nT` | SD | Scroll Down (stub — recognized, not yet implemented) |
+| `ESC[nT` | SD | Scroll Down _n_ lines (default 1) |
 | `ESC[s` | SCP | Save Cursor Position |
 | `ESC[u` | RCP | Restore Cursor Position |
 | `ESC[…m` | SGR | Set Graphics Rendition (see below) |
 
+`IL` and `DL` are what make **vim scroll correctly under `TERM=ansi`**. That terminfo entry has
+no `csr` and no `ri`, so vim emulates a scrolling region with `il1`/`dl1` rather than setting one.
+
+**Not yet implemented:** `ESC[r` (DECSTBM scrolling region) and `ESC M` (RI, reverse index) — both
+needed for `TERM=vt100`/`xterm`, which scroll with `csr`+`ri`. Also `ESC[n@` (ICH), `ESC[nP` (DCH),
+`ESC[nX` (ECH) and `ESC[nd` (VPA); the `ansi` terminfo advertises these, but vim never emits them.
+
 **Silently ignored CSI sequences** (recognized to avoid display garbage):
-`ESC[c` (DA), `ESC[n` (DSR), `ESC[t` (window ops), `ESC[!p` (soft reset), `ESC[!_` (DECSTR)
+`ESC[c` (DA), `ESC[n` (DSR), `ESC[t` (window ops), `ESC[!p` (soft reset), `ESC[!_` (DECSTR),
+and any sequence with a private-parameter prefix `?` `>` `=` `<` (e.g. `ESC[?25l`, `ESC[>4;2m`)
 
 #### SGR Parameters (`ESC[…m`)
 
@@ -138,6 +149,7 @@ Standard Atari keyboard, plus these terminal-specific bindings:
 
 - **[ca65/ld65](https://cc65.github.io/doc/ca65.html)** (cc65 suite) — primary assembler/linker
 - **dir2atr** — for creating bootable ATR disk images
+- **cl65 / sim65** (cc65 suite) — only needed for `make test`
 
 ---
 
@@ -146,6 +158,9 @@ Standard Atari keyboard, plus these terminal-specific bindings:
 | File | Description |
 |------|-------------|
 | `ANSIVBXE_ca65.asm` | Main source (ca65 assembler) |
+| `scroll_rgn.inc` | CPU row-move primitives for the scrolling region (shared with the unit test) |
+| `test/sim65/scroll_test.s` | Host-side unit test for `scroll_rgn.inc` (`make test`) |
+| `test/smoke.sh`, `test/scroll.sh` | Visual tests, run on the remote host over a live session |
 | `atarios_ca65.inc` | Atari OS equates |
 | `atarihardware_ca65.inc` | Atari hardware equates |
 | `VBXE_ca65.inc` | VBXE hardware equates |
@@ -172,6 +187,18 @@ Build bootable ATR disk image:
 ```sh
 make disk
 ```
+
+Run the unit tests:
+
+```sh
+make test
+```
+
+The scrolling-region primitives in `scroll_rgn.inc` are pure CPU memory moves over the flat
+80×24 cell array and reference no Atari or VBXE hardware, so the *same source* the XEX builds
+is assembled for cc65's `sim65` 6502 simulator and exercised directly. Requires `cl65` and
+`sim65` from the cc65 suite. For anything that needs the real screen, run `test/scroll.sh`
+(or `test/smoke.sh`) on the remote host once the Atari has connected.
 
 Clean build artifacts:
 
@@ -214,6 +241,13 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.21 — 2026-07-07
+- **Fixed vim scrolling under `TERM=ansi`.** Implemented `IL` (`ESC[nL`) and `DL` (`ESC[nM`), and replaced the `SD` (`ESC[nT`) stub with a real implementation. The `ansi` terminfo entry has no `csr` and no `ri`, so vim emulates a scrolling region with `il1`/`dl1` — neither of which existed, and both of which were silently swallowed by the CSI dispatcher. Only the *up* direction was broken because scrolling down needs no control sequence at all, just LF.
+- Fixed `ED` (`ESC[J`) leaving the last cell of the cursor's row unerased (it used `79 - column` where `EL` correctly uses `80 - column`), and erasing nothing at all with the cursor at column 79.
+- CSI sequences with a private-parameter prefix (`?` `>` `=` `<`) are now swallowed instead of falling into a public handler with a bogus parameter list — `ESC[>4;2m` was reaching `SGR_adr`.
+- Silenced the OS SIO bus sound (`SOUNDR`) for FujiNet N: sessions. N: performs a raw SIO transaction per poll/read/keystroke-batch, so the serial bus whine played continuously. R: is unaffected (it streams over CIO concurrent mode). Restored on disconnect, exit and RESET.
+- Added `make test`: the scrolling-region primitives live in `scroll_rgn.inc`, touch no Atari or VBXE hardware, and are unit-tested against the same source under cc65's `sim65` 6502 simulator. Also `test/scroll.sh` for visual verification over a live session.
 
 ### v0.20 — 2026-07-07
 - Fixed a freeze when opening the OPTION font menu and selecting a font *before* a device (R:/N:) is chosen. `device_type` defaults to `0` (indistinguishable from "R: selected"), so the font swap ran the R: reopen/reconfigure against an R: device that was never opened and hung in `CIOV`. A new `dev_ready` flag now tracks whether a device is actually open, so pre-connection font loads only swap VBXE font RAM — no serial I/O, no hang. Font previewing before connecting still works; in-session R:/N: swap behavior is unchanged.

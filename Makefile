@@ -13,6 +13,7 @@ MADS_ATR    = $(PROJ_NAME).ATR
 
 CA65_SRC    = $(PROJ_NAME)_ca65.asm
 CA65_DEPS   = atarios_ca65.inc atarihardware_ca65.inc VBXE_ca65.inc
+CA65_MAIN_DEPS = $(CA65_DEPS) scroll_rgn.inc
 CA65_OBJ    = $(PROJ_NAME)_ca65.o
 CA65_XEX    = $(PROJ_NAME)_ca65.XEX
 CA65_ATR    = $(PROJ_NAME)_ca65.ATR
@@ -23,9 +24,32 @@ VBXE_LIB_SRC = vbxe_lib.asm
 VBXE_LIB_OBJ = vbxe_lib.o
 VBXE_LIB     = vbxe_lib.lib
 
-.PHONY: all disk ca65 ca65-disk mads mads-disk vbxe-lib clean
+CL65      ?= cl65
+SIM65     ?= sim65
+BUILD_DIR   = build
+SCROLL_TEST_SRC = test/sim65/scroll_test.s
+SCROLL_TEST_BIN = $(BUILD_DIR)/scroll_test.bin
+
+.PHONY: all disk ca65 ca65-disk mads mads-disk vbxe-lib clean test
 
 all: mads ca65
+
+# Host-side unit test for the scrolling-region primitives. scroll_rgn.inc touches no
+# Atari or VBXE hardware, so the same source the XEX uses runs under cc65's 6502
+# simulator. Exit code is 0, or the id of the first check that failed.
+test: $(SCROLL_TEST_BIN)
+	@$(SIM65) $(SCROLL_TEST_BIN); \
+	code=$$?; \
+	if [ $$code -eq 0 ]; then \
+		echo "scroll_rgn: all checks passed"; \
+	else \
+		echo "scroll_rgn: FAILED at check $$code (see $(SCROLL_TEST_SRC))"; \
+		exit 1; \
+	fi
+
+$(SCROLL_TEST_BIN): $(SCROLL_TEST_SRC) scroll_rgn.inc
+	@mkdir -p $(BUILD_DIR)
+	$(CL65) -t sim6502 --asm-include-dir . -o $@ $(SCROLL_TEST_SRC)
 
 vbxe-lib: $(VBXE_LIB)
 
@@ -37,7 +61,7 @@ $(VBXE_LIB): $(VBXE_LIB_OBJ)
 
 ca65: $(CA65_XEX)
 
-$(CA65_OBJ): $(CA65_SRC) $(CA65_DEPS)
+$(CA65_OBJ): $(CA65_SRC) $(CA65_MAIN_DEPS)
 	$(CA65) $(CA65_SRC) -o $(CA65_OBJ)
 
 $(CA65_XEX): $(CA65_OBJ) $(VBXE_LIB)
@@ -64,3 +88,4 @@ $(MADS_ATR): $(MADS_XEX)
 
 clean:
 	rm -f $(MADS_XEX) $(MADS_ATR) $(CA65_OBJ) $(CA65_XEX) $(CA65_ATR) $(VBXE_LIB_OBJ) $(VBXE_LIB)
+	rm -rf $(BUILD_DIR)
