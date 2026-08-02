@@ -17,3 +17,5 @@ VCOUNT		=	$D40B			; line count / 2
 CONSOL		=	$D01F			; console key register
 ; POKEY equates
 KBCODE		=	$D209			; keyboard code register
+; PIA equates
+PORTB		=	$D301			; XL/XE memory management; bit 1 = 1 disables the BASIC ROM

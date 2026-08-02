@@ -34,8 +34,13 @@ memac_b_control	=	$D65D
 memac_control	=	$D65E
 
 memac_bank_sel	=	$D65F			; controls bank number of movable window (MEMAC A). bit 7 is an enable bit
-psel		=	$D644			; selects the pallette number to load into
-csel		=	$D645			; selects current color number for write
+; Palette write port.  Register order here is CSEL then PSEL — see the FX core register
+; map, "Dx44 CSEL / Dx45 PSEL".  They were transposed in this file until v0.22; the bug
+; hid because every read of Dx40-Dx5C returns 255, so the old `inc csel` was really an
+; `inc` of PSEL that read $FF and stored $00, pinning PSEL to palette 0 while CB's own
+; auto-increment did the colour stepping that `inc csel` appeared to be doing.
+csel		=	$D644			; selects current color number for write
+psel		=	$D645			; selects the pallette number to load into
 cr		=	$D646			; red component value
 cg		=	$D647			; green component value
 cb		=	$D648			; blue component value

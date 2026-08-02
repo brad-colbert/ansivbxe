@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.21
+;	Version: v0.22
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -142,6 +142,10 @@ scroll_top	= $B0				; 0-based top row of the DECSTBM region (default 0)
 scroll_bot	= $B1				; 0-based bottom row of the DECSTBM region (default 23)
 scr_src		= $B2				; 2 bytes — row-copy source, scroll primitives only
 scr_dst		= $B4				; 2 bytes — row-copy destination / blank target
+
+saved_portb	= $B6				; PORTB as found at startup (_vbxe_init banks BASIC out
+						; so the MEMAC window at $A000 is not shadowed by ROM;
+						; restore_os_hooks puts the original value back on exit)
 
 SOUNDR		= $41				; OS SIO bus sound enable (0 = silent)
 
@@ -3579,6 +3583,9 @@ ok		ldy	#$01			; positive Y = success
 
 		lda	saved_soundr		; restore OS SIO bus sound setting
 		sta	SOUNDR
+
+		lda	saved_portb		; put the BASIC ROM back the way we found it
+		sta	PORTB
 		rts
 .endproc
 
@@ -3695,7 +3702,7 @@ exit_to_dos
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
 dev_ready	.res	1, $00				; 1 = a device (R:/N:) is open; gates R: font-swap serial I/O
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.21 (2026-07-07)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.22 (2026-08-02)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -3733,11 +3740,18 @@ xdl						; start of xdl
 
 ; displays 24 scanlines of no overlay (ANTIC display list should be displaying blank
 ; lines of GTIA background color)
+;
+; The ATT block below picks the palettes: bits 7-6 = playfield/PMG palette, bits 5-4 =
+; Overlay palette, bits 1-0 = Overlay width.  The Overlay is on palette 1 (VBXE's own
+; default for it) so that palette 0 — the palette every ANTIC/GTIA colour register value
+; is rendered through — is left as the stock Atari palette.  Nothing restores palette 0
+; on RESET, so an ANSI palette parked there would follow us out of the program: see the
+; palette-programming block in vbxe_lib.asm for the full reasoning.
 
 		.byte	%00110100		; OVOFF, MAPOFF, RPTL - overlay off, color map off, repeat scanlines
 		.byte	%00001000		; ATT - display size and overlay priority
 		.byte	24-1			; 24 scanlines
-		.byte	%00000001		; pallette 0, ANTIC normal mode
+		.byte	%00010001		; PF palette 0, OV palette 1, ANTIC normal width
 		.byte	%11111111		; overlay is priority over everything
 
 ; now on to the 80x24 text portion

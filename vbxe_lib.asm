@@ -38,6 +38,7 @@ dst_ptr		= $87		; 2-byte destination pointer for mem_move
 counter		= $89		; 2-byte byte-count for mem_move
 
 saved_sdmctl	= $9F		; SDMCTL saved by _vbxe_init, restored by _vbxe_shutdown
+saved_portb	= $B6		; PORTB saved by _vbxe_init, restored by the caller on exit
 
 ;----------------------------------------------------------------------
 ; Exports
@@ -60,6 +61,7 @@ vl_font_ptr	.res 2		; extracted font_path pointer (lo, hi)
 vl_pal_ptr	.res 2		; extracted pal_path pointer  (lo, hi)
 vl_xdl_ptr	.res 2		; extracted xdl_data pointer  (lo, hi)
 vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
+vl_csel		.res 1		; running CSEL value while programming the overlay palette
 
 ;######################################################################################################################################
 ;
@@ -93,6 +95,19 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 		; FX-compatible core detected
 		lda	SDMCTL
 		sta	saved_sdmctl
+
+		; The MEMAC A window lands at $A000, which on an XL/XE is also where the BASIC
+		; ROM sits.  With BASIC banked in, the ROM answers every CPU access to the
+		; window: the palette file reads back as ROM bytes and every screen write is
+		; lost.  Cold boot happens to work because DOS boots with OPTION held, but the
+		; XL OS re-reads OPTION on warm start too, so pressing RESET without holding it
+		; banks BASIC back in and the terminal restarts onto a garbled display.  Bank it
+		; out here so the window is ours on every entry, cold or post-RESET.
+		lda	PORTB
+		sta	saved_portb
+		ora	#$02			; bit 1 = 1 → BASIC ROM disabled, $A000-$BFFF is RAM
+		sta	PORTB
+
 		lda	#$20			; instruction-fetch only — shut off ANTIC display DMA
 		sta	SDMCTL
 		sta	$D400			; apply DMACTL change immediately (not just next VBI)
@@ -228,46 +243,71 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 		;
 		; Foreground layout: 16 FG colours, loaded 8 times = 128 entries (CSEL 0-127)
 		; Background layout: 8 BG colours, each loaded 16 times = 128 entries (CSEL 128-255)
+		;
+		; PALETTE 1, NOT PALETTE 0.  VBXE renders the ordinary ANTIC/GTIA picture
+		; through palette 0, so writing the ANSI colours there remaps every OS colour
+		; register value.  Pressing RESET terminates XDL processing and hands the
+		; display back to ANTIC, but — per the FX manual — "no RESET is able to restore
+		; the default VBXE palette if it has been already modified by a program".  With
+		; the ANSI palette in slot 0 the DOS screen that follows RESET comes back red on
+		; red: GR.0's background COLPF2=$94 lands on entry 148 (ANSI colour 1, $AA0000)
+		; and the hi-res foreground $9A lands on entry 154 (also colour 1).
+		;
+		; Palette 1 is VBXE's own default for the Overlay precisely so that palette 0 can
+		; stay the ANTIC palette; the XDL's ATT block selects it (see `xdl` in the main
+		; source).  Palette 0 is therefore never touched and RESET/exit land on a normal
+		; Atari display.
+		;
+		; CSEL is written explicitly for every entry rather than stepped with `inc csel`.
+		; That `inc` never worked: VBXE_ca65.inc had CSEL and PSEL transposed, so it was
+		; an `inc` of PSEL, and since every VBXE register reads back as $FF it stored $00
+		; each time — which is the only reason this loop stayed on palette 0 at all.  The
+		; colour stepping was really CB's own auto-increment.  Setting CSEL per entry is
+		; independent of that auto-increment, so it also holds on older FX cores that
+		; predate it.
 
-		lda	#$00
-		sta	psel
-		sta	csel
+		lda	#$01
+		sta	psel			; select palette 1 — the Overlay palette
 
 		; --- foreground: outer loop 8 repetitions, inner loop 16 colours (48 bytes) ---
-		ldy	#$00
+		lda	#$00
+		sta	vl_csel			; CSEL 0-127
 @fore_outer
 		ldx	#$00
 @fore_inner
+		lda	vl_csel
+		sta	csel
 		lda	vbxe_mem_base + $0800, x	; red
 		sta	cr
 		lda	vbxe_mem_base + $0801, x	; green
 		sta	cg
 		lda	vbxe_mem_base + $0802, x	; blue
 		sta	cb
-		inc	csel
+		inc	vl_csel
 		inx
 		inx
 		inx
 		cpx	#$30			; 16 colours × 3 bytes = $30
 		bne	@fore_inner
-		iny
-		cpy	#$08			; 8 repetitions
+		lda	vl_csel
+		cmp	#$80			; 8 repetitions = 128 entries
 		bne	@fore_outer
 
 		; --- background: outer loop 8 colours (3 bytes each), inner loop 16 entries each ---
 		ldy	#$00
 @back_outer
-		ldx	#$00
+		ldx	#$10			; 16 entries per background colour
 @back_inner
+		lda	vl_csel
+		sta	csel
 		lda	vbxe_mem_base + $0800, y	; red  (fixed for this outer iteration)
 		sta	cr
 		lda	vbxe_mem_base + $0801, y	; green
 		sta	cg
 		lda	vbxe_mem_base + $0802, y	; blue
 		sta	cb
-		inc	csel
-		inx
-		cpx	#$10			; 16 entries per background colour
+		inc	vl_csel
+		dex
 		bne	@back_inner
 		iny
 		iny
@@ -475,7 +515,7 @@ vl_xdl_sz	.res 2		; extracted xdl_size          (lo, hi)
 		sta	vbxe_mem_base + $0801
 		lda	#216-1
 		sta	vbxe_mem_base + $0802	; extend first OVOFF entry across the full display
-		lda	#%00000001		; palette/flags byte for OVOFF block
+		lda	#%00010001		; PF palette 0, OV palette 1 — match the runtime XDL
 		sta	vbxe_mem_base + $0803
 
 		lda	#$05			; keep XDL active while color-0 is opaque (runtime mode)

@@ -10,3 +10,6 @@ build/
 *.XEX
 *.ATR
 disk/ANSIVBXE.AR1
+
+#
+fonts/
