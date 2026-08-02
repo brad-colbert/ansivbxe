@@ -7,6 +7,19 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.22] - 2026-08-02
+
+### Fixed
+- **The screen turned red after RESET, and DOS came back unreadable.** The ANSI palette was loaded into VBXE palette **0**. Palette 0 is not a spare bank — it is the palette VBXE renders the ordinary ANTIC/GTIA picture through, so overwriting it remaps every OS colour-register value on the machine. Pressing RESET terminates XDL processing and hands the display back to ANTIC, but per the FX manual "no RESET is able to restore the default VBXE palette if it has been already modified by a program". The result was arithmetically exact: GR.0's background `COLPF2 = $94` indexes entry 148, which the background half of the ANSI layout (8 colours × 16 entries starting at 128) fills with colour 1, `$AA0000`; the ANTIC hi-res foreground byte `$9A` (COLPF2's hue + COLPF1's luma) indexes entry 154, also colour 1. Red text on a red background.
+
+  The overlay now uses palette **1** — VBXE's own default for the Overlay, chosen by the `XDL OV PALETTE` field of the XDL's ATT block (`%00010001`) — and palette 0 is left alone. Verified in Altirra: after RESET, `.vbxe_pal $90` shows the stock Atari ramp with entry `$94` back to `1C4092`, and MyDOS returns to its normal blue menu.
+
+- **`PSEL` and `CSEL` were transposed in the register equates.** The FX core register map is `Dx44 = CSEL`, `Dx45 = PSEL`; `VBXE.equ` and `VBXE_ca65.inc` both had it backwards. Nothing appeared to be wrong because every VBXE register reads back as `$FF`: the `inc csel` in the palette loops was really an `inc` of PSEL, which read `$FF` and stored `$00`, pinning the palette to bank 0 forever — and the colour stepping everyone assumed that `inc` was doing was actually `CB`'s documented auto-increment of CSEL. The two bugs cancelled out precisely as long as the target was palette 0, and selecting any other palette was impossible until this was fixed.
+
+  The ca65 loops now also write CSEL explicitly for every entry instead of leaning on the auto-increment, which the FX manual documents but which older cores predate.
+
+- **The BASIC ROM is banked out before the MEMAC window is opened.** The MEMAC A window is mapped at `$A000`, which on an XL/XE is also where the BASIC ROM lives; with BASIC banked in, the ROM answers every CPU access to the window, so the palette file reads back as ROM bytes and every screen write is lost. Cold boot happened to work because the machine boots with OPTION held to load DOS, but the XL OS re-reads OPTION on *warm* start too — so pressing RESET without holding OPTION banked BASIC back in, and the terminal restarted onto a garbled display (a uniform lavender screen, being whatever BASIC ROM bytes the palette loader happened to read). `_vbxe_init` now sets `PORTB` bit 1 on entry, so the window is ours on every start, cold or post-RESET; `restore_os_hooks` puts the original `PORTB` back on the way out.
+
 ## [0.21] - 2026-07-07
 
 ### Added

@@ -34,8 +34,10 @@ memac_b_control	equ	$D65D
 memac_control	equ	$D65E
 
 memac_bank_sel	equ	$D65F			; controls bank number of movable window (MEMAC A). bit 7 is an enable bit
-psel		equ	$D644			; selects the pallette number to load into
-csel		equ	$D645			; selects current color number for write
+; Palette write port.  Register order here is CSEL then PSEL — see the FX core register
+; map, "Dx44 CSEL / Dx45 PSEL".  They were transposed in this file until v0.22.
+csel		equ	$D644			; selects current color number for write
+psel		equ	$D645			; selects the pallette number to load into
 cr		equ	$D646			; red component value
 cg		equ	$D647			; green component value
 cb		equ	$D648			; blue component value

@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.21  
+**Version:** v0.22  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -241,6 +241,11 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.22 — 2026-08-02
+- **Fixed the red screen after RESET.** The ANSI palette was being loaded into VBXE palette **0**, which is the palette VBXE renders the ordinary ANTIC/GTIA picture through. RESET stops XDL processing and hands the display back to ANTIC, but nothing restores palette 0, so DOS came back red on red — GR.0's `COLPF2 = $94` landed on entry 148 (ANSI colour 1) and the hi-res foreground `$9A` on entry 154 (also colour 1). The overlay now uses palette 1, which is VBXE's own default for it, and palette 0 is never touched.
+- **Fixed transposed `PSEL`/`CSEL` equates.** The FX register map is `Dx44 = CSEL`, `Dx45 = PSEL`; both `VBXE.equ` and `VBXE_ca65.inc` had them the other way round. The bug was invisible because every VBXE register reads back as `$FF`, so the `inc csel` in the palette loops was really an `inc` of PSEL that stored `$00` — pinning the palette to bank 0 while `CB`'s own auto-increment did the colour stepping. Selecting any palette but 0 was impossible until this was corrected.
+- **The BASIC ROM is now banked out at startup.** The MEMAC A window sits at `$A000`, the same address as the XL/XE BASIC ROM; with BASIC banked in, the ROM answers every access to the window, so the palette file reads back as ROM bytes and screen writes are lost. Cold boot happened to work because DOS boots with OPTION held, but the XL OS re-reads OPTION on warm start too — so pressing RESET without holding it banked BASIC back in and the terminal restarted onto a garbled display. `PORTB` bit 1 is now set before the window is opened, and the original value is restored on exit.
 
 ### v0.21 — 2026-07-07
 - **Fixed vim scrolling under `TERM=ansi`.** Implemented `IL` (`ESC[nL`) and `DL` (`ESC[nM`), and replaced the `SD` (`ESC[nT`) stub with a real implementation. The `ansi` terminfo entry has no `csr` and no `ri`, so vim emulates a scrolling region with `il1`/`dl1` — neither of which existed, and both of which were silently swallowed by the CSI dispatcher. Only the *up* direction was broken because scrolling down needs no control sequence at all, just LF.

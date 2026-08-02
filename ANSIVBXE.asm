@@ -110,6 +110,14 @@ start		lda	core_version
 core_fx		; for FX core compatible versions (1.2x, 1.26, 1.40, etc)
 		; we'll accept the FX core and proceed without strict version checking
 
+; The MEMAC A window lands at $A000, which on an XL/XE is also where the BASIC ROM sits.
+; With BASIC banked in the ROM answers every CPU access to the window, so bank it out.
+; This matters on RESET as much as at boot: the XL OS re-reads OPTION on warm start, so
+; pressing RESET without holding it banks BASIC back in under the window.
+		lda	PORTB
+		ora	#$02			; bit 1 = 1 → BASIC ROM disabled, $A000-$BFFF is RAM
+		sta	PORTB
+
 		lda	#$20			; shut off ANTIC DMA except instruction fetch
 		sta	SDMCTL
 
@@ -357,10 +365,20 @@ clear_ram_end
 		jsr	CIOV
 
 ; initialize csel and psel to start loading colors into the pallette
+;
+; Palette 1, not palette 0: VBXE renders the ordinary ANTIC/GTIA picture through
+; palette 0, and nothing — not even RESET — restores it once a program has overwritten
+; it, so the ANSI colours parked there came back as an unreadable red DOS screen after
+; RESET.  Palette 1 is VBXE's own default for the Overlay; the XDL's ATT byte selects it.
+;
+; CSEL is left to its own auto-increment (a CB write steps it).  The `inc csel` that used
+; to sit in these loops was reading a register that always returns $FF and storing $00,
+; so it never stepped anything; it only looked correct because CB was doing the work.
 
+		lda	#$01
+		sta	psel			; palette 1 — the Overlay palette
 		lda	#$00
-		sta	psel
-		sta	csel
+		sta	csel			; start at colour 0; CB writes step it from here
 
 .local		; load the foreground colors into the VBXE
 ; we use a nested loop here due to the design of the text mode colors
@@ -375,8 +393,7 @@ fore_inner_loop	lda	vbxe_mem_base + $0800,x	; load the color values. use index x
 		lda	vbxe_mem_base + $0801,x
 		sta	cg
 		lda	vbxe_mem_base + $0802,x
-		sta	cb
-		inc	csel			; move to next color entry
+		sta	cb			; CB write also steps CSEL to the next entry
 		inx				; increment 3 times because each color is 3 bytes
 		inx
 		inx
@@ -401,8 +418,7 @@ back_inner_loop	lda	vbxe_mem_base + $0800,y	; load the color values. use index y
 		lda	vbxe_mem_base + $0801,y
 		sta	cg
 		lda	vbxe_mem_base + $0802,y
-		sta	cb
-		inc	csel			; move to next color entry
+		sta	cb			; CB write also steps CSEL to the next entry
 		inx				; increment the inner loop
 		cpx	#$10			; stop after the color has been loaded 16 times
 		bne	back_inner_loop
@@ -1257,7 +1273,7 @@ xdl		; start of xdl
 		.byte	%00110100		; OVOFF, MAPOFF, RPTL - overlay off, color map off, repeat scanlines
 		.byte	%00001000		; ATT - display size and overlay priority
 		.byte	24-1			; 24 scanlines
-		.byte	%00000001		; pallette 0, ANTIC normal mode
+		.byte	%00010001		; PF palette 0, OV palette 1, ANTIC normal width
 		.byte	%11111111		; overlay is priority over everything
 
 ; now on to the 80x24 text portion
