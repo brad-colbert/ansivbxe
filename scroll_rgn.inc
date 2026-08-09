@@ -12,6 +12,11 @@
 ;     scroll_bot        zero page, 0-based bottom row of the region
 ;     scr_src, scr_dst  zero page, 2 bytes each (must not alias src_ptr/dst_ptr/counter)
 ;     sr_top, sr_bot, sr_n, sr_rows   one byte each, anywhere
+;   and, for row_insert_char / row_delete_char only:
+;     row               zero page, 0-based cursor row
+;     column            zero page, 0-based cursor column
+;     term_last_col     zero page, highest column the row operations may touch
+;     rc_last, rc_floor one byte each, anywhere
 ;
 ; CPU row-move primitives for the scrolling region (IL/DL/SD/SU/RI).
 ;
@@ -213,5 +218,97 @@ blank_all	lda	sr_bot
 		sta	scroll_top
 		lda	#23
 		sta	scroll_bot
+		rts
+.endproc
+
+;###################################################################################################################
+; Within-row cell moves, for ATASCII insert/delete character ($FF/$FE).
+;
+; Both work on the cursor row between `column` and `term_last_col` inclusive, so
+; in 40-column ATASCII mode they leave columns 40-79 alone. Cells are 2 bytes,
+; and the shift is exactly one cell, so both routines set up scr_dst at the row
+; base and scr_src one cell further along and let a single Y index walk the pair
+; — the same trick copy_row_fwd uses between rows.
+;
+; Like the row movers above, these require the cursor to be OFF, and they
+; clobber A, X, Y, scr_src, scr_dst, rc_last and rc_floor.
+
+.proc row_setup_ptrs				; scr_dst = row base, scr_src = row base + one cell
+; Also computes rc_last = byte offset of the last writable cell in the row and
+; rc_floor = byte offset of the cursor cell. Clobbers A, X.
+		lda	row
+		tax
+		lda	row_addr_lo,x
+		sta	scr_dst
+		clc
+		adc	#2			; one cell further along the same row
+		sta	scr_src
+		lda	row_addr_hi,x
+		sta	scr_dst + 1
+		adc	#0			; propagate the carry from the low byte
+		sta	scr_src + 1
+
+		lda	term_last_col		; max 79, so *2 cannot overflow a byte
+		asl
+		sta	rc_last
+		lda	column
+		asl
+		sta	rc_floor
+		rts
+.endproc
+
+.proc row_delete_char				; pull cells left over the cursor cell
+; cell[c] <- cell[c+1] for c = column .. term_last_col-1, then blank the last cell.
+		jsr	row_setup_ptrs
+		ldy	rc_floor
+@loop		cpy	rc_last
+		bcs	@blank			; reached the last cell: nothing left to pull in
+		lda	(scr_src),y		; character
+		sta	(scr_dst),y
+		iny
+		lda	(scr_src),y		; colour
+		sta	(scr_dst),y
+		iny
+		jmp	@loop
+@blank		lda	#0			; Y = rc_last — vacate the rightmost cell
+		sta	(scr_dst),y
+		iny
+		lda	text_color		; NOT $00: bit 7 is the overlay opacity bit
+		sta	(scr_dst),y
+		rts
+.endproc
+
+.proc row_insert_char				; push cells right, opening a hole at the cursor
+; cell[c] <- cell[c-1] for c = term_last_col .. column+1, then blank the cursor cell.
+; Walks downward so a cell is read before it is overwritten.
+		jsr	row_setup_ptrs
+
+		lda	rc_last
+		sec
+		sbc	#2			; start at the second-to-last cell
+		bcc	@blank			; row has no room to shift at all
+		cmp	rc_floor
+		bcc	@blank			; cursor is at or past the last cell
+		tay
+@loop		lda	(scr_dst),y		; cell[c-1] ...
+		sta	(scr_src),y		; ... becomes cell[c]
+		iny
+		lda	(scr_dst),y
+		sta	(scr_src),y
+		tya				; step back one cell: Y is at the colour byte,
+		sec				; so that is minus 3, not minus 2
+		sbc	#3
+		bcc	@blank			; walked off the front of the row
+		cmp	rc_floor
+		bcc	@blank			; walked past the cursor cell
+		tay
+		jmp	@loop
+
+@blank		ldy	rc_floor		; vacate the cursor cell
+		lda	#0
+		sta	(scr_dst),y
+		iny
+		lda	text_color
+		sta	(scr_dst),y
 		rts
 .endproc

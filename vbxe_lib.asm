@@ -10,6 +10,7 @@
 ;  Exported symbols (underscore prefix = cc65 C linkage):
 ;    _vbxe_init         — detect FX core, save SDMCTL, open MEMAC window
 ;    _vbxe_load_files   — load font+palette from disk, copy XDL+BCBs, enable display
+;    _vbxe_font_from_rom— build the ATASCII font from the OS charset ROM at $E000
 ;    _vbxe_shutdown     — hide VBXE overlay, close MEMAC, restore SDMCTL
 ;    _vbxe_clear_ram    — zero-fill all 512 K of VBXE RAM via blitter
 ;
@@ -47,6 +48,7 @@ saved_portb	= $B6		; PORTB saved by _vbxe_init, restored by the caller on exit
 	.export	_vbxe_init
 	.export	_vbxe_load_files
 	.export	_vbxe_load_font
+	.export	_vbxe_font_from_rom
 	.export	_vbxe_shutdown
 	.export	_vbxe_clear_ram
 
@@ -484,6 +486,95 @@ vl_csel		.res 1		; running CSEL value while programming the overlay palette
 		sta	memac_bank_sel
 		ldx	#0
 		lda	#0
+		rts
+
+.endproc
+
+
+;======================================================================
+;
+;  void __fastcall__ vbxe_font_from_rom (void)
+;
+;  Build the ATASCII character set into VBXE font RAM from the Atari OS
+;  charset ROM at $E000, without touching the disk.
+;
+;  The OS charset is 1 KB — 128 glyphs of 8 bytes, in *internal* (screen
+;  code) order, which is the order this terminal uses in ATASCII mode.
+;  VBXE wants a 256-glyph set, so the ROM is copied twice: verbatim into
+;  glyphs $00-$7F, then inverted (EOR $FF) into glyphs $80-$FF.  Inverting
+;  the bitmap is exactly what ANTIC does for an inverse-video character,
+;  so bit 7 of a screen byte selects inverse for free with no attribute
+;  handling in the caller.
+;
+;  Unlike _vbxe_load_font this does no CIO and therefore no SIO, so it
+;  cannot disturb an R: device sitting in concurrent mode — callers need
+;  no CLOSE/re-OPEN bracketing.
+;
+;  MEMAC is flipped to bank 0 for the copy ($A000-$A7FF = VBXE $0000-$07FF)
+;  and the previous bank is restored, same contract as _vbxe_load_font.
+;  PORTB bit 0 is forced on for the duration so the OS ROM is guaranteed
+;  visible at $E000: _vbxe_init only asserts bit 1 (BASIC off), leaving
+;  bit 0 as DOS left it, and reading RAM garbage here would produce a
+;  screen of noise rather than a font.
+;
+;  Returns: A=1, X=0 (cannot fail).
+;
+;======================================================================
+
+CHARSET_ROM	= $E000			; OS charset, 128 glyphs, internal order
+
+.proc _vbxe_font_from_rom
+
+		; remember the current MEMAC bank so we can restore it
+		lda	memac_bank_sel
+		pha
+
+		; guarantee the OS ROM is banked in at $E000
+		lda	PORTB
+		pha
+		ora	#$01			; bit 0 = 1 → OS ROM enabled
+		sta	PORTB
+
+		; flip MEMAC to bank 0 so $A000-$A7FF = VBXE $0000-$07FF
+		lda	#$80
+		sta	memac_bank_sel
+
+		; glyphs $00-$7F: straight copy of the ROM charset  → VBXE $0000-$03FF
+		; glyphs $80-$FF: the same 1 KB inverted            → VBXE $0400-$07FF
+		; The charset is exactly 4 pages, so unroll by page and let one
+		; index walk all eight source/destination pairs.
+		ldy	#$00
+@byte_loop
+		lda	CHARSET_ROM+$000,y
+		sta	vbxe_mem_base+$000,y
+		eor	#$FF
+		sta	vbxe_mem_base+$400,y
+
+		lda	CHARSET_ROM+$100,y
+		sta	vbxe_mem_base+$100,y
+		eor	#$FF
+		sta	vbxe_mem_base+$500,y
+
+		lda	CHARSET_ROM+$200,y
+		sta	vbxe_mem_base+$200,y
+		eor	#$FF
+		sta	vbxe_mem_base+$600,y
+
+		lda	CHARSET_ROM+$300,y
+		sta	vbxe_mem_base+$300,y
+		eor	#$FF
+		sta	vbxe_mem_base+$700,y
+
+		iny
+		bne	@byte_loop
+
+		; restore prior MEMAC bank and PORTB
+		pla
+		sta	PORTB
+		pla
+		sta	memac_bank_sel
+		ldx	#0
+		lda	#1
 		rts
 
 .endproc

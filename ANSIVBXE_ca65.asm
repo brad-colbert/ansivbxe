@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.22
+;	Version: v0.23
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -54,6 +54,7 @@
 	.include "VBXE_ca65.inc"		; and VBXE equates
 
 	.import	_vbxe_init, _vbxe_load_files, _vbxe_load_font, _vbxe_shutdown
+	.import	_vbxe_font_from_rom
 
 ; VBXE equates
 vbxe_mem_base	= $A000				; If I put it here, it should be OK and it won't conflict with the extended RAM.
@@ -146,6 +147,20 @@ scr_dst		= $B4				; 2 bytes — row-copy destination / blank target
 saved_portb	= $B6				; PORTB as found at startup (_vbxe_init banks BASIC out
 						; so the MEMAC window at $A000 is not shadowed by ROM;
 						; restore_os_hooks puts the original value back on exit)
+
+; Terminal-mode state. Like the scroll region above, these live past $AF so they
+; survive an OPTION menu invocation ($A3-$AF is menu-owned scratch).
+term_last_col	= $B7				; highest column the auto-wrap may reach: 79 in ANSI,
+						; 39 in ATASCII by default. Bounds wrapping ONLY —
+						; absolute positioning and erase/scroll stay physical-80.
+atascii_mode	= $B8				; 0 = ANSI/CP437, 1 = ATASCII. Selects the whole byte
+						; pipeline: dispatcher, glyph translation, key encoding.
+atascii_esc	= $B9				; 1 = ATASCII ESC ($1B) seen; print the next byte
+						; literally instead of interpreting it as a control.
+atascii_inv	= $BA				; $00 or $80 — sticky keyboard inverse-video latch,
+						; toggled by the Atari inverse key, EORed into sent bytes.
+active_font	= $BB				; main_menu item index of the font currently loaded,
+						; drawn with a '*' marker by menu_redraw_items.
 
 SOUNDR		= $41				; OS SIO bus sound enable (0 = silent)
 
@@ -301,6 +316,20 @@ init_terminal_state
 		lda	#$01
 		sta	lf_mode
 
+; Terminal mode: ANSI, 80-column auto-wrap, no pending ATASCII escape, inverse off.
+		lda	#$00
+		sta	atascii_mode
+		sta	atascii_esc
+		sta	atascii_inv
+		lda	#79
+		sta	term_last_col
+
+; _vbxe_load_files boots the font named by vbxe_load_cfg (ATARIPC.FNT), so the
+; menu's '*' marker starts on that row.
+		lda	#MENU_ITEM_ATARI
+		sta	active_font
+		jsr	menu_init_labels	; render the Mode:/Width: value rows for their initial state
+
 		jsr	reset_margins		; scrolling region starts as the full screen
 
 		lda	#$00
@@ -313,7 +342,7 @@ init_terminal_state
 ; so we clear the page first, which fills the page with null and the default color
 		jsr	scroll_page
 		jsr	cursor_on
-		
+
 ;###################################################################################################################
 ; demo it by writing a file to the screen (for now at least)
 ; open the test file
@@ -942,7 +971,10 @@ n_recv_disconnect
 .endproc
 
 .proc process_char
-		lda	ctrl_seq_flg		; fast path: no parser state, just print
+		lda	atascii_mode		; ATASCII has its own control set and its own
+		beq	is_ansi			; meanings for $1B and $9B, so it gets its own
+		jmp	atascii_char		; dispatcher rather than a branch in this one
+is_ansi		lda	ctrl_seq_flg		; fast path: no parser state, just print
 		bne	have_flags
 		jmp	not_C1
 have_flags	bit	ctrl_seq_flg
@@ -1048,6 +1080,17 @@ is_C1
 		sta	jump_C1 + 2
 jump_C1		jmp	$0000
 .endproc
+
+; Entry point that always uses the ANSI control interpretation, whatever the
+; terminal mode is. For the program's OWN screen output — the banner, the
+; prompts, the connection wizard — which is ANSI text we author, and which would
+; otherwise be mangled in ATASCII mode ($1B there quotes the next byte, so the
+; banner's colour sequences would print as literal "[31m" runs).
+;
+; Note this bypasses only the *parser* fork, not the glyph translation: put_byte
+; still runs to_glyph, so the text is drawn with the correct screen codes for
+; whichever font is loaded.
+process_char_ansi = process_char::is_ansi
 		
 .proc do_ctrl_seq
 		lda	#0
@@ -1095,8 +1138,9 @@ last_entry	rts				; if we searched the whole list and didn't find it, do nothing
 
 .proc put_byte					; put the byte on the screen
 		jsr	cursor_off
-		ldx	#$00
 		lda	temp_char
+		jsr	to_glyph		; in ATASCII mode, map the code to a screen code
+		ldx	#$00
 		sta	(cursor_address, x)
 		inc	cursor_address
 		lda	text_color		; get the current text color
@@ -1105,15 +1149,19 @@ last_entry	rts				; if we searched the whole list and didn't find it, do nothing
 		bne	no_carry		; if the increment resulted in 0, then we rolled over and need to carry
 		inc	cursor_address + 1	; carry means high address needs to be incremented
 no_carry	inc	column			; move the cursor forward
-		lda	#79
+		lda	term_last_col		; 79 in ANSI, 39 in 40-column ATASCII
 		cmp	column
-		bcs	no_new_line		; if 79 >= col, no new line is needed
+		bcs	no_new_line		; if last_col >= col, no new line is needed
 		lda	row
 		cmp	#23			; if row is 23, then we need to scroll a line
 		beq	scroll
-		inc	row			; otherwise (when col > 79) go to the next line
+		inc	row			; otherwise (when col > term_last_col) go to the next line
 		lda	#00
 		sta	column			; set column back to 0
+		jsr	recalc_cursor		; cursor_address does NOT follow for free here. It has
+						; advanced term_last_col+1 cells, which lands on the
+						; start of the next row only when the wrap column is 80;
+						; at 40 it is still mid-row, so recompute it from row/column
 no_new_line	jmp	cursor_on
 
 scroll		lda	#<(vbxe_mem_base + $1000 - 160)
@@ -1124,6 +1172,221 @@ no_carry_1	lda	#0			; otherwise, don't
 		sta	column			; set column to 0. row stays 23
 		jsr	scroll_1d		; run the blitter routine to scroll one line down.
 		jmp	cursor_on
+.endproc
+
+;###################################################################################################################
+; character-encoding primitives (to_glyph, atascii_to_int, ascii_to_atascii).
+; Hardware-free and shared verbatim with test/sim65/atascii_test.s.
+
+		.include "atascii.inc"
+
+;###################################################################################################################
+; ATASCII byte pipeline
+;
+; Entered from process_char when atascii_mode is set, and it bypasses the
+; ANSI/CSI state machine entirely — it has to, because $1B is ATASCII's
+; quote-next-character escape and $9B is EOL, neither of which means what the
+; ANSI parser would take it to mean.
+;
+; The ATASCII control set is exactly (c & $7F) in {$1B-$1F, $7D-$7F}. The plain
+; and inverse-bit forms of each pair carry unrelated meanings ($1C is cursor-up,
+; $9C is delete-line), so all sixteen dispatch separately. Everything else is a
+; printable glyph — including the entire $80-$FF inverse range, which needs no
+; special handling at all: to_glyph passes bit 7 through to the inverted half of
+; the font that _vbxe_font_from_rom built.
+
+.proc atascii_char
+		lda	atascii_esc
+		beq	check_ctrl
+		lda	#$00			; previous byte was ESC — print this one
+		sta	atascii_esc		; whatever it is, control code or not
+		jmp	put_byte
+
+check_ctrl	lda	temp_char
+		and	#$7F
+		cmp	#$1B
+		bcc	print			; $00-$1A graphics characters
+		cmp	#$20
+		bcc	low_group		; $1B-$1F / $9B-$9F
+		cmp	#$7D
+		bcc	print			; $20-$7C text
+						; $7D-$7F / $FD-$FF falls through
+
+; --- $7D-$7F, and their inverse-bit forms $FD-$FF ---
+		bit	temp_char		; N = bit 7 of the original byte
+		bmi	high_inverse
+		cmp	#$7D
+		beq	do_clear		; $7D clear screen and home
+		cmp	#$7E
+		beq	t_backspace		; $7E destructive backspace
+		jmp	HT_adr			; $7F tab
+
+high_inverse	cmp	#$7D
+		beq	do_bell			; $FD buzzer
+		cmp	#$7E
+		beq	t_del_char		; $FE delete character
+		jmp	do_ins_char		; $FF insert character
+
+; --- $1B-$1F, and their inverse-bit forms $9B-$9F ---
+low_group	bit	temp_char
+		bmi	low_inverse
+		cmp	#$1B
+		beq	do_esc			; $1B quote the next character
+		cmp	#$1C
+		beq	do_up			; $1C cursor up
+		cmp	#$1D
+		beq	do_down			; $1D cursor down
+		cmp	#$1E
+		beq	do_left			; $1E cursor left
+		jmp	do_right		; $1F cursor right
+
+low_inverse	cmp	#$1B
+		beq	t_eol			; $9B end of line
+		cmp	#$1C
+		beq	t_del_line		; $9C delete line
+		cmp	#$1D
+		beq	t_ins_line		; $9D insert line
+		rts				; $9E clear / $9F set tab stop. Tab stops are
+						; fixed at 8 columns here, so these are no-ops
+						; for the same reason HTS_adr/VTS_adr are.
+
+print		jmp	put_byte
+do_clear	jmp	FF_adr			; home + clear, exactly ANSI's form feed
+do_bell		jmp	BEL_adr
+
+; The editing handlers sit past the end of branch range from the chain above,
+; so they are reached through these near trampolines.
+t_backspace	jmp	do_backspace
+t_del_char	jmp	do_del_char
+t_eol		jmp	do_eol
+t_del_line	jmp	do_del_line
+t_ins_line	jmp	do_ins_line
+
+do_esc		lda	#$01
+		sta	atascii_esc
+		rts
+
+; --- cursor movement ---
+;
+; ATASCII cursor controls WRAP at the screen edges rather than clamping the way
+; ANSI CUU/CUD/CUF/CUB do, and wrapping off the bottom returns to the top
+; instead of scrolling. That is why none of the ANSI handlers can be reused.
+
+do_up		jsr	cursor_off
+		lda	row
+		bne	@dec
+		lda	#24			; wrap from the top row round to the bottom
+@dec		sec
+		sbc	#1
+		sta	row
+		jmp	reposition
+
+do_down		jsr	cursor_off
+		lda	row
+		cmp	#23
+		bcc	@inc
+		lda	#$FF			; wrap from the bottom row back to the top
+@inc		clc
+		adc	#1
+		sta	row
+		jmp	reposition
+
+do_left		jsr	cursor_off
+		jsr	left_core
+		jmp	reposition
+
+do_right	jsr	cursor_off
+		lda	column
+		cmp	term_last_col
+		bcc	@inc
+		lda	#$00			; past the right margin: down a line, column 0
+		sta	column
+		lda	row
+		cmp	#23
+		bcc	@next_row
+		lda	#$FF			; and off the bottom wraps to the top
+@next_row	clc
+		adc	#1
+		sta	row
+		jmp	reposition
+@inc		inc	column
+		jmp	reposition
+
+.proc left_core					; column-- with wrap to the end of the previous row
+; Shared by cursor-left and backspace. Adjusts row/column only — the caller is
+; responsible for cursor_off, recalc_cursor and cursor_on.
+		lda	column
+		bne	@dec
+		lda	term_last_col		; wrap to the right margin of the row above
+		sta	column
+		lda	row
+		bne	@row_up
+		lda	#24			; and off the top wraps to the bottom
+@row_up		sec
+		sbc	#1
+		sta	row
+		rts
+@dec		dec	column
+		rts
+.endproc
+
+reposition	jsr	recalc_cursor
+		jmp	cursor_on
+
+; --- editing ---
+
+do_backspace					; move left, then erase the cell landed on
+		jsr	cursor_off
+		jsr	left_core
+		jsr	recalc_cursor
+		ldy	#$00
+		lda	#$00			; internal $00 is space in the ROM charset
+		sta	(cursor_address),y
+		iny
+		lda	text_color		; must be text_color, not $00: bit 7 is the
+		sta	(cursor_address),y	; VBXE overlay opacity bit
+		jmp	cursor_on
+
+do_ins_line					; open a blank line at the cursor row
+		lda	row			; ignore if the cursor is outside the region,
+		cmp	scroll_top		; matching IL_adr
+		bcc	bail
+		lda	scroll_bot
+		cmp	row
+		bcc	bail
+		jsr	cursor_off
+		ldy	#$01
+		lda	row
+		ldx	scroll_bot
+		jsr	scroll_rgn_down
+		jmp	cursor_on
+
+do_del_line					; pull the region up over the cursor row
+		lda	row
+		cmp	scroll_top
+		bcc	bail
+		lda	scroll_bot
+		cmp	row
+		bcc	bail
+		jsr	cursor_off
+		ldy	#$01
+		lda	row
+		ldx	scroll_bot
+		jsr	scroll_rgn_up
+		jmp	cursor_on
+
+do_ins_char	jsr	cursor_off
+		jsr	row_insert_char
+		jmp	cursor_on
+
+do_del_char	jsr	cursor_off
+		jsr	row_delete_char
+		jmp	cursor_on
+
+do_eol		jsr	CR_adr			; EOL is unconditionally CR + LF, so enter the
+		jmp	line_feed_no_cr		; line feed past its lf_mode check
+
+bail		rts
 .endproc
 
 ;###################################################################################################################
@@ -1183,6 +1446,12 @@ no_carry	inc	row			; Line Feed increments row
 scroll		jsr	scroll_1d		; scroll one line down. we don't need to touch the cursor address, the row, or column.
 		jmp	cursor_on
 .endproc
+
+; Entry point into LF_adr past its lf_mode test, for callers that have already
+; done the carriage return themselves (ATASCII EOL). Declared out here because
+; atascii_char is assembled earlier in the file and a Scope::label reference
+; cannot resolve before the scope exists.
+line_feed_no_cr	= LF_adr::lf_no_cr
 
 .proc CR_adr					; Carriage Return puts the cursor at the home position of the current line 
                                                 ; (AKA, cursor gets column number * 2 bytes/char subtracted from it)
@@ -1288,9 +1557,10 @@ APC_adr		lda	#$10
 		and	#$F8			; round down to current 8-col boundary
 		clc
 		adc	#8			; advance one stop
-		cmp	#80			; clamp at right margin
+		cmp	term_last_col		; clamp at the right margin (79, or 39 in 40-column ATASCII)
 		bcc	ok
-		lda	#79
+		beq	ok
+		lda	term_last_col
 ok		sta	column
 		jsr	recalc_cursor
 		jmp	cursor_on
@@ -2224,11 +2494,26 @@ new_key		txa
 
 		lda	KBCODE			; reload — A was clobbered by the menu_active check above
 		tax
-		lda	keycode_table,x		; get the action byte from the table
+
+; The Atari inverse-video key has no ASCII meaning, so keycode_table drops it
+; (entries 39/103/167/231 are all 0). In ATASCII mode it becomes a sticky
+; modifier instead, latching bit 7 onto everything typed after it.
+		lda	atascii_mode
+		beq	translate
+		txa
+		and	#$3F			; same key with any combination of shift/ctrl
+		cmp	#KBCODE_INVERSE
+		beq	toggle_inverse
+
+translate	lda	keycode_table,x		; get the action byte from the table
 		beq	no_value		; 0 means: do nothing
 		bmi	send_seq		; bit 7 set means: emit an escape sequence (see escape_seq table)
 
-		ldx	sendbufend		; single-byte path: get the current FIFO end
+		ldy	atascii_mode
+		beq	push_byte
+		jsr	ascii_to_atascii	; retarget the handful of keys ATASCII spells differently
+
+push_byte	ldx	sendbufend		; single-byte path: get the current FIFO end
 		inx				; advance to next slot
 		cpx	sendbufstart		; if that equals start, the buffer is full
 		beq	no_value		; drop the keypress
@@ -2236,8 +2521,24 @@ new_key		txa
 		sta	send_buffer,x		; store the byte
 		jmp	no_value
 
+toggle_inverse	lda	atascii_inv
+		eor	#$80
+		sta	atascii_inv
+		jmp	no_value
+
 send_seq	and	#$7F			; A = sequence index (0..n)
-		sta	temp_key_char		; save N (adc can't add A to itself)
+
+; ATASCII spells the arrows as single control codes rather than ESC [ x, so the
+; whole three-byte path (and its free-slot check) is skipped.
+		ldy	atascii_mode
+		beq	ansi_seq
+		cmp	#$04			; indices 0-3 are the four arrow keys
+		bcs	no_value		; no other sequence has an ATASCII form
+		tay
+		lda	atascii_arrows,y
+		jmp	push_byte
+
+ansi_seq	sta	temp_key_char		; save N (adc can't add A to itself)
 		asl				; A = 2N
 		clc
 		adc	temp_key_char		; A = 3N = byte offset into escape_seq
@@ -2281,6 +2582,18 @@ bounce		lda	#$30			; we still set the repeat timer on a bounce I guess
 		pla				; apparently the routine which jumps through the keyboard vector pushes A
 		rti				; RTI because interupt
 .endproc
+
+; Raw KBCODE of the Atari inverse-video key, masked to its low six bits so the
+; plain, shifted and control forms all match.
+KBCODE_INVERSE	= 39
+
+; ATASCII cursor controls, in the same order as escape_seq's arrow entries.
+atascii_arrows	.byte	$1C			; $80 - cursor up
+		.byte	$1D			; $81 - cursor down
+		.byte	$1F			; $82 - cursor right
+		.byte	$1E			; $83 - cursor left
+
+; ascii_to_atascii lives in atascii.inc, included above with to_glyph.
 		
 .proc print_str
 ; Display a $9B-terminated string on the VBXE terminal.
@@ -2293,7 +2606,8 @@ next_char	ldy	#$00
 		cmp	#$9B
 		beq	done
 		sta	temp_char
-		jsr	process_char		; may corrupt all registers including Y
+		jsr	process_char_ansi	; our own UI text is ANSI in every mode;
+						; may corrupt all registers including Y
 		inc	src_ptr
 		bne	next_char
 		inc	src_ptr+1
@@ -2580,13 +2894,30 @@ KBCODE_DOWN	= 143
 MENU_COLOR_NORM	= $87				; white-on-black, overlay enabled (matches default text)
 MENU_COLOR_HILT	= $F0				; black-on-white (MENU_COLOR_NORM EOR $77)
 
-; CP437 single-line box-drawing glyphs (depends on CP437-compatible font)
-BOX_UL		= 218				; upper-left  corner
-BOX_UR		= 191				; upper-right corner
-BOX_LL		= 192				; lower-left  corner
-BOX_LR		= 217				; lower-right corner
-BOX_VERT	= 179				; vertical edge
-BOX_HORZ	= 196				; horizontal edge
+; Box-drawing slots. These are indices into box_glyphs_* below, NOT glyph codes:
+; menu_draw_box writes raw glyph indices to the overlay, so it cannot go through
+; to_glyph (which translates character codes) and instead needs a whole parallel
+; glyph set for the ATASCII font. Fetch one with box_glyph.
+BOX_UL		= 0				; upper-left  corner
+BOX_UR		= 1				; upper-right corner
+BOX_LL		= 2				; lower-left  corner
+BOX_LR		= 3				; lower-right corner
+BOX_VERT	= 4				; vertical edge
+BOX_HORZ	= 5				; horizontal edge
+BOX_SPACE	= 6				; box interior fill
+
+; CP437 single-line box drawing. Stems use bit $10 / row 4, so corners and edges
+; visually connect. True of every font shipped in fonts/ and disk/.
+box_glyphs_cp437
+		.byte	218, 191, 192, 217, 179, 196, 32
+
+; The same box in Atari internal screen codes, for ATASCII mode. The Atari
+; charset has a matching single-line set in its graphics range: ATASCII $11 $05
+; $1A $03 $12 are the four corners and the horizontal bar, which become internal
+; $51 $45 $5A $43 $52; the vertical uses the ordinary '|' at $7C. Internal $00 is
+; space.
+box_glyphs_atascii
+		.byte	$51, $45, $5A, $43, $7C, $52, $00
 
 ; menu state ZP cells (above $A0-$A2 which hold the IRQ-state owned by kbd_irq:
 ; menu_active / menu_key / menu_key_ready — those are equated near the top of
@@ -2630,6 +2961,18 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		sta	menu_dismiss
 		sta	menu_key_ready		; drop any prior stale key
 
+; start the highlight on the first row that is actually selectable, in case the
+; menu opens with a divider or heading at the top
+		ldx	#$00
+@find_first	txa
+		jsr	menu_get_action
+		bne	@got_first
+		inx
+		cpx	menu_count
+		bcc	@find_first
+		ldx	#$00			; nothing selectable at all — degenerate, sit on row 0
+@got_first	stx	menu_selected
+
 ; debounce: wait until OPTION is released before showing menu, otherwise
 ; the user's still-held press would immediately re-trigger after dismiss.
 @wait_release
@@ -2661,20 +3004,29 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		beq	@key_dismiss
 		jmp	@loop			; ignore other keys
 
+; Movement steps over non-selectable rows (dividers/headings, action_ptr $0000)
+; rather than landing on them. If only dividers lie in the chosen direction the
+; selection is left where it was.
 @key_up
-		lda	menu_selected
-		beq	@loop			; already at top
-		dec	menu_selected
+		ldx	menu_selected
+@up_step	dex
+		bmi	@loop			; ran off the top: nothing selectable up there
+		txa
+		jsr	menu_get_action
+		beq	@up_step		; divider — keep going
+		stx	menu_selected
 		jsr	menu_redraw_items
 		jmp	@loop
 
 @key_down
-		lda	menu_selected
-		clc
-		adc	#$01
-		cmp	menu_count
-		bcs	@loop			; already at bottom
-		sta	menu_selected
+		ldx	menu_selected
+@down_step	inx
+		cpx	menu_count
+		bcs	@loop			; ran off the bottom
+		txa
+		jsr	menu_get_action
+		beq	@down_step
+		stx	menu_selected
 		jsr	menu_redraw_items
 		jmp	@loop
 
@@ -2692,12 +3044,13 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 .endproc
 
 
-.proc menu_invoke_action
-; Look up action_ptr for menu_selected and JSR through it (so the action's
-; rts returns here, not to the caller of menu_open).
+.proc menu_get_action
+; A = item index → menu_action = that item's action pointer.
+; Returns with Z set when the pointer is $0000, which marks a non-selectable
+; row: a divider or heading that the highlight skips over and RETURN ignores.
 ; Per-item record is 4 bytes: label_lo, label_hi, action_lo, action_hi.
 ; Records start at offset 5 (after the 5-byte header).
-		lda	menu_selected
+; Preserves X. Clobbers A, Y.
 		asl
 		asl				; * 4 (record size)
 		clc
@@ -2710,8 +3063,19 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		iny
 		lda	(menu_ptr),y
 		sta	menu_action+1
-		jsr	@trampoline		; classic 6502 indirect-JSR via RTS-after-JMP
+		ora	menu_action		; Z set iff both halves are zero
 		rts
+.endproc
+
+
+.proc menu_invoke_action
+; Look up action_ptr for menu_selected and JSR through it (so the action's
+; rts returns here, not to the caller of menu_open).
+		lda	menu_selected
+		jsr	menu_get_action
+		beq	@not_an_action		; divider row — RETURN does nothing
+		jsr	@trampoline		; classic 6502 indirect-JSR via RTS-after-JMP
+@not_an_action	rts
 @trampoline
 		jmp	(menu_action)
 .endproc
@@ -2866,7 +3230,9 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 @item_loop
 		lda	mr_idx
 		cmp	menu_count
-		bcs	@done
+		bcc	@have_item		; out-of-range to branch to @done directly
+		jmp	@done
+@have_item
 
 ; compute row of this item: menu_row + 1 (for top border) + idx
 		lda	menu_row
@@ -2889,10 +3255,15 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		lda	(menu_ptr),y
 		sta	mr_label+1
 
-; choose color: highlight if idx == menu_selected
+; choose color: highlight if idx == menu_selected, but never highlight a
+; non-selectable row — the cursor cannot land on one anyway
+		lda	mr_idx
+		jsr	menu_get_action
+		beq	@normal
 		lda	mr_idx
 		cmp	menu_selected
 		beq	@hilite
+@normal
 		lda	#MENU_COLOR_NORM
 		jmp	@have_color
 @hilite
@@ -2901,6 +3272,9 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		sta	mr_color
 
 ; clear interior of this row first (col+1 .. col+w-2) with spaces
+		lda	#' '
+		jsr	to_glyph		; hoisted out of the loop
+		sta	mr_blank
 		lda	mr_row
 		ldx	menu_col
 		inx				; skip left border
@@ -2911,7 +3285,7 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		sbc	#$02			; interior width = w - 2
 		sta	mr_inner_w
 @clear_loop
-		lda	#' '
+		lda	mr_blank
 		sta	(src_ptr),y
 		iny
 		lda	mr_color
@@ -2919,6 +3293,24 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		iny
 		dec	mr_inner_w
 		bne	@clear_loop
+
+; mark the loaded font with a '*' in the pad column, so the menu says which of
+; the font rows is actually live
+		lda	mr_idx
+		cmp	active_font
+		bne	@no_marker
+		lda	mr_row
+		ldx	menu_col
+		inx
+		jsr	menu_compute_addr
+		lda	#'*'
+		jsr	to_glyph
+		ldy	#$00
+		sta	(src_ptr),y
+		iny
+		lda	mr_color
+		sta	(src_ptr),y
+@no_marker
 
 ; draw the label at col+2 (one space of padding inside the box)
 		lda	mr_row
@@ -2938,10 +3330,20 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 .endproc
 
 
+.proc box_glyph
+; Y = BOX_* slot → A = the glyph index for that slot in the active font.
+; Clobbers A only.
+		lda	atascii_mode
+		bne	@atascii
+		lda	box_glyphs_cp437,y
+		rts
+@atascii	lda	box_glyphs_atascii,y
+		rts
+.endproc
+
+
 .proc menu_draw_box
-; Draw the box border using CP437 single-line glyphs. Assumes the active
-; font follows the CP437 layout (true of every font shipped in fonts/ and
-; disk/). Stems use bit $10 / row 4, so corners and edges visually connect.
+; Draw the box border, in whichever glyph set the active font provides.
 		lda	menu_h
 		sta	mb_h_left
 
@@ -2963,28 +3365,36 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		jmp	@is_middle
 
 @is_top
-		lda	#BOX_UL
+		ldy	#BOX_UL
+		jsr	box_glyph
 		sta	mb_corner
-		lda	#BOX_UR
+		ldy	#BOX_UR
+		jsr	box_glyph
 		sta	mb_corner_r
-		lda	#BOX_HORZ
+		ldy	#BOX_HORZ
+		jsr	box_glyph
 		sta	mb_fill
 		jmp	@draw
 
 @is_bottom
-		lda	#BOX_LL
+		ldy	#BOX_LL
+		jsr	box_glyph
 		sta	mb_corner
-		lda	#BOX_LR
+		ldy	#BOX_LR
+		jsr	box_glyph
 		sta	mb_corner_r
-		lda	#BOX_HORZ
+		ldy	#BOX_HORZ
+		jsr	box_glyph
 		sta	mb_fill
 		jmp	@draw
 
 @is_middle
-		lda	#BOX_VERT
+		ldy	#BOX_VERT
+		jsr	box_glyph
 		sta	mb_corner
 		sta	mb_corner_r
-		lda	#' '
+		ldy	#BOX_SPACE
+		jsr	box_glyph
 		sta	mb_fill
 		; fall through
 
@@ -3053,6 +3463,8 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		ldy	#$00
 		lda	(ps_str),y
 		beq	@done
+		jsr	to_glyph		; labels are ASCII, and ASCII and ATASCII agree
+		ldy	#$00			; over $20-$7A — but to_glyph clobbers Y
 		sta	(src_ptr),y		; char into cell low byte
 		iny
 		lda	ps_color
@@ -3104,148 +3516,224 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 @done		rts
 .endproc
 
-.proc font_swap_done
+.proc font_swap_restore_r
 ; Post-disk-SIO recovery. On R:, re-OPEN IOCB 1 via open_r_device (which
 ; falls through to configure_r_device for XIO 36/38/34/40). The R: handler
 ; goes through its full open + concurrent-mode setup, same as at boot.
 ; N: needs no recovery — never closed.
 		lda	dev_ready
-		beq	@dismiss		; no device open — just dismiss, no R: open/reconfigure
+		beq	@done			; no device open — no R: open/reconfigure needed
 		lda	device_type
-		bne	@dismiss
+		bne	@done
 		jsr	open_r_device
-@dismiss	lda	#$01
+@done		rts
+.endproc
+
+.proc font_swap_done
+; Recovery plus "close the menu" — for leaf actions that finish the interaction.
+; Actions that stay open (the Mode row) call font_swap_restore_r directly.
+		jsr	font_swap_restore_r
+		lda	#$01
 		sta	menu_dismiss
 		rts
 .endproc
 
-.proc font_load_ibm
+.proc font_load_index
+; A = main_menu item index of a font row → load that font into VBXE font RAM.
+; Bracketed by the R: close/reopen because _vbxe_load_font does disk SIO.
+; Does NOT dismiss the menu — the caller decides that.
+		sec
+		sbc	#MENU_ITEM_FONT_BASE
+		asl				; * 2 for the pointer table
+		tax
+		lda	font_path_table,x
+		sta	fl_path			; park the path across font_swap_prep_r
+		lda	font_path_table+1,x
+		sta	fl_path+1
 		jsr	font_swap_prep_r
-		lda	#<font_path_ibm
-		ldx	#>font_path_ibm
+		lda	fl_path
+		ldx	fl_path+1
 		jsr	_vbxe_load_font
+		jmp	font_swap_restore_r
+.endproc
+
+.proc font_load_selected
+; The action behind every font row. The row's own position in main_menu selects
+; the path, so adding a font is one label, one path and one menu line — no new
+; action proc.
+;
+; Picking a CP437 font also means picking ANSI: the two can never disagree,
+; which is what makes the single Mode row sufficient for mutual exclusion.
+		lda	menu_selected
+		sta	active_font
+		jsr	font_load_index
+		lda	#$00
+		sta	atascii_mode
+		lda	#79
+		sta	term_last_col
+		jsr	menu_init_labels	; the Mode row may have just changed
 		jmp	font_swap_done
 .endproc
 
-.proc font_load_atari
-		jsr	font_swap_prep_r
-		lda	#<font_path_atari
-		ldx	#>font_path_atari
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
+.proc act_cycle_mode
+; RETURN on the Mode row. Each terminal mode owns its character set, so this
+; also swaps the font and the default wrap width. The menu deliberately stays
+; open (no menu_dismiss) so the effect is visible against the menu itself.
+		lda	atascii_mode
+		eor	#$01
+		sta	atascii_mode
+		beq	@to_ansi
+
+; ATASCII: build the charset from the OS ROM. No CIO and no SIO, so unlike the
+; font rows this needs no R: close/reopen bracketing at all.
+		jsr	_vbxe_font_from_rom
+		lda	#39			; ATASCII art is drawn for a 40-column screen
+		sta	term_last_col
+		jmp	@refresh
+
+; ANSI: reload whichever font row is marked active — its glyphs were overwritten
+; by the ROM charset.
+@to_ansi	lda	#79
+		sta	term_last_col
+		lda	active_font
+		jsr	font_load_index
+
+; Full redraw, not just the items: the character set changed underneath us, so
+; the box border's glyph codes have to be re-emitted from the other glyph set.
+@refresh	jsr	menu_init_labels
+		jmp	menu_draw
 .endproc
 
-.proc font_load_ascprin
-		jsr	font_swap_prep_r
-		lda	#<font_path_ascprin
-		ldx	#>font_path_ascprin
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
+.proc act_cycle_width
+; RETURN on the Width row toggles the auto-wrap column between 80 and 40.
+; Independent of mode, so ATASCII can be forced to 80 for hosts that assume it.
+		lda	term_last_col
+		cmp	#79
+		beq	@to_40
+		lda	#79
+		bne	@store			; always taken
+@to_40		lda	#39
+@store		sta	term_last_col
+		jsr	menu_init_labels
+		jmp	menu_redraw_items
 .endproc
 
-.proc font_load_balloon
-		jsr	font_swap_prep_r
-		lda	#<font_path_balloon
-		ldx	#>font_path_balloon
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
+.proc menu_init_labels
+; Rebuild the two value rows from live terminal state. Called at startup and by
+; any action that changes mode or width, so the labels are derived data rather
+; than something that can drift out of sync.
+		lda	#<lbl_mode
+		sta	dst_ptr
+		lda	#>lbl_mode
+		sta	dst_ptr+1
+		lda	atascii_mode
+		beq	@mode_ansi
+		lda	#<str_mode_atascii
+		ldx	#>str_mode_atascii
+		jsr	copy_to_label
+		jmp	@width
+@mode_ansi	lda	#<str_mode_ansi
+		ldx	#>str_mode_ansi
+		jsr	copy_to_label
+
+@width		lda	#<lbl_width
+		sta	dst_ptr
+		lda	#>lbl_width
+		sta	dst_ptr+1
+		lda	term_last_col
+		cmp	#79
+		beq	@width_80
+		lda	#<str_width_40
+		ldx	#>str_width_40
+		jmp	copy_to_label
+@width_80	lda	#<str_width_80
+		ldx	#>str_width_80
+		jmp	copy_to_label
 .endproc
 
-.proc font_load_bozo
-		jsr	font_swap_prep_r
-		lda	#<font_path_bozo
-		ldx	#>font_path_bozo
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_bzzz2
-		jsr	font_swap_prep_r
-		lda	#<font_path_bzzz2
-		ldx	#>font_path_bzzz2
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_casualgt
-		jsr	font_swap_prep_r
-		lda	#<font_path_casualgt
-		ldx	#>font_path_casualgt
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_computer
-		jsr	font_swap_prep_r
-		lda	#<font_path_computer
-		ldx	#>font_path_computer
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_cursive
-		jsr	font_swap_prep_r
-		lda	#<font_path_cursive
-		ldx	#>font_path_cursive
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_hero
-		jsr	font_swap_prep_r
-		lda	#<font_path_hero
-		ldx	#>font_path_hero
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_newsletter
-		jsr	font_swap_prep_r
-		lda	#<font_path_newsletter
-		ldx	#>font_path_newsletter
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_preppie
-		jsr	font_swap_prep_r
-		lda	#<font_path_preppie
-		ldx	#>font_path_preppie
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
-.endproc
-
-.proc font_load_shadow
-		jsr	font_swap_prep_r
-		lda	#<font_path_shadow
-		ldx	#>font_path_shadow
-		jsr	_vbxe_load_font
-		jmp	font_swap_done
+.proc copy_to_label
+; A/X = null-terminated source, dst_ptr = destination buffer. src_ptr/dst_ptr are
+; safe here: the only callers are menu actions and init_terminal_state, neither
+; of which runs inside print_str or read_line_vbxe.
+		sta	src_ptr
+		stx	src_ptr+1
+		ldy	#$00
+@loop		lda	(src_ptr),y
+		sta	(dst_ptr),y
+		beq	@done
+		iny
+		cpy	#MENU_LABEL_MAX-1
+		bcc	@loop
+		lda	#$00			; hard-terminate an over-long string
+		sta	(dst_ptr),y
+@done		rts
 .endproc
 
 ; --- menu data ---
 ;
-; v1 is a flat menu; submenus would require either per-menu save buffers or
-; a stack-style allocator on save_under_buf to support nesting safely. When
-; future options are added (sound, local echo, force disconnect) just append
-; new entries here and bump the count + height — extending the menu is two
-; lines of data + an action proc.
+; Still a flat menu; submenus would require either per-menu save buffers or
+; a stack-style allocator on save_under_buf to support nesting safely.
+;
+; Two kinds of row now exist:
+;   * command rows — RETURN calls action_ptr (font rows, which then dismiss)
+;   * value rows   — RETURN calls action_ptr, which mutates state, rewrites its
+;                    own label and redraws, leaving the menu open
+;   * an action_ptr of $0000 marks a non-selectable divider or heading: the
+;     highlight steps over it and RETURN ignores it
+;
+; To add a font: one label, one entry in font_path_table, one menu line, and
+; bump the count + height. To add a setting: a value row and its action.
+
+MENU_ITEM_FONT_BASE = 3				; main_menu index of the first font row
+MENU_ITEM_ATARI	= MENU_ITEM_FONT_BASE + 1	; AtariPC — the font loaded at boot
+MENU_LABEL_MAX	= 16				; size of the mutable label buffers
 
 main_menu
-		.byte	8, 30, 18, 15, 13	; row, col, width, height, item count
-		.word	lbl_ibm,        font_load_ibm
-		.word	lbl_atari,      font_load_atari
-		.word	lbl_ascprin,    font_load_ascprin
-		.word	lbl_balloon,    font_load_balloon
-		.word	lbl_bozo,       font_load_bozo
-		.word	lbl_bzzz2,      font_load_bzzz2
-		.word	lbl_casualgt,   font_load_casualgt
-		.word	lbl_computer,   font_load_computer
-		.word	lbl_cursive,    font_load_cursive
-		.word	lbl_hero,       font_load_hero
-		.word	lbl_newsletter, font_load_newsletter
-		.word	lbl_preppie,    font_load_preppie
-		.word	lbl_shadow,     font_load_shadow
+		.byte	3, 30, 20, 18, 16	; row, col, width, height, item count
+		.word	lbl_mode,       act_cycle_mode
+		.word	lbl_width,      act_cycle_width
+		.word	lbl_divider,    0
+		.word	lbl_ibm,        font_load_selected
+		.word	lbl_atari,      font_load_selected
+		.word	lbl_ascprin,    font_load_selected
+		.word	lbl_balloon,    font_load_selected
+		.word	lbl_bozo,       font_load_selected
+		.word	lbl_bzzz2,      font_load_selected
+		.word	lbl_casualgt,   font_load_selected
+		.word	lbl_computer,   font_load_selected
+		.word	lbl_cursive,    font_load_selected
+		.word	lbl_hero,       font_load_selected
+		.word	lbl_newsletter, font_load_selected
+		.word	lbl_preppie,    font_load_selected
+		.word	lbl_shadow,     font_load_selected
+
+; Font paths, in main_menu row order — index = item index - MENU_ITEM_FONT_BASE.
+font_path_table
+		.word	font_path_ibm
+		.word	font_path_atari
+		.word	font_path_ascprin
+		.word	font_path_balloon
+		.word	font_path_bozo
+		.word	font_path_bzzz2
+		.word	font_path_casualgt
+		.word	font_path_computer
+		.word	font_path_cursive
+		.word	font_path_hero
+		.word	font_path_newsletter
+		.word	font_path_preppie
+		.word	font_path_shadow
+
+; Value-row text. menu_init_labels copies one of each pair into the mutable
+; label buffers; the buffers, not these, are what main_menu points at.
+str_mode_ansi	.byte	"Mode:  ANSI", 0
+str_mode_atascii .byte	"Mode:  ATASCII", 0
+str_width_80	.byte	"Width: 80", 0
+str_width_40	.byte	"Width: 40", 0
+
+; Plain hyphens rather than a box-drawing rule: menu_put_str_at runs labels
+; through to_glyph, and '-' is the one horizontal mark that survives that
+; translation intact in both character sets.
+lbl_divider	.byte	"----------------", 0
 
 lbl_ibm		.byte	"IBMPC", 0
 lbl_atari	.byte	"AtariPC", 0
@@ -3281,6 +3769,14 @@ sr_top		.res	1		; scroll_rgn_* effective top row
 sr_bot		.res	1		; scroll_rgn_* effective bottom row
 sr_n		.res	1		; scroll_rgn_* line count
 sr_rows		.res	1		; rows remaining in the row-move loop
+rc_last		.res	1		; row_*_char: byte offset of the last writable cell
+rc_floor	.res	1		; row_*_char: byte offset of the cursor cell
+fl_path		.res	2		; font_load_index: path pointer held across the R: close
+
+; Mutable menu labels for the value rows — these hold text, not state, and are
+; regenerated from terminal state by menu_init_labels.
+lbl_mode	.res	MENU_LABEL_MAX
+lbl_width	.res	MENU_LABEL_MAX
 su_rows_left	.res	1
 su_byte_count	.res	1
 mc_row		.res	1
@@ -3289,6 +3785,7 @@ mr_idx		.res	1
 mr_row		.res	1
 mr_label	.res	2
 mr_color	.res	1
+mr_blank	.res	1		; space glyph for the active font, hoisted per row
 mr_inner_w	.res	1
 mr_putcol	.res	1
 mb_h_left	.res	1
@@ -3298,7 +3795,7 @@ mb_corner	.res	1		; left-edge / left-corner glyph for current row
 mb_corner_r	.res	1		; right-edge / right-corner glyph for current row
 mb_fill		.res	1
 ps_color	.res	1
-save_under_buf	.res	960		; 40 cols × 12 rows × 2 bytes — covers any v1 menu
+save_under_buf	.res	960		; menu_w × menu_h × 2 bytes; main_menu needs 20×18×2 = 720
 
 ;###################################################################################################################
 
@@ -3702,7 +4199,7 @@ exit_to_dos
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
 dev_ready	.res	1, $00				; 1 = a device (R:/N:) is open; gates R: font-swap serial I/O
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.22 (2026-08-02)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.23 (2026-08-09)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -4265,6 +4762,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.21.2026.07.07"
+version		.byte	"v0.23.2026.08.09"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

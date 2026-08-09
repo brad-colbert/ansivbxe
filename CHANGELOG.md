@@ -7,6 +7,37 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.23] - 2026-08-09
+
+### Added
+- **ATASCII terminal mode.** The terminal can now be pointed at an Atari BBS. ATASCII is handled as a *mode*, not a font — it has its own control set, its own character encoding and its own keyboard encoding, and `process_char` forks to a separate dispatcher for it. That fork is not optional: `$1B` in ATASCII quotes the next byte rather than introducing an escape sequence, and `$9B` is EOL rather than CSI, so the ANSI parser cannot be reused for even one byte of it.
+
+  Implemented controls: `$1B` quote-next, `$1C-$1F` cursor up/down/left/right (wrapping at the screen edges, where ANSI's CUU/CUD clamp — which is why none of the ANSI handlers could be shared), `$7D` clear + home, `$7E` destructive backspace, `$7F` tab, `$9B` EOL, `$9C`/`$9D` delete/insert line, `$9E`/`$9F` clear/set tab stop (no-ops, matching the existing fixed 8-column `HTS`/`VTS` behaviour), `$FD` buzzer, `$FE`/`$FF` delete/insert character. Everything else prints, including the whole `$80-$FF` inverse range.
+
+- **The ATASCII character set is built from the OS ROM at `$E000`, not loaded from disk** (`_vbxe_font_from_rom`). The ROM charset is 1 KB / 128 glyphs; it is copied verbatim into glyphs `$00-$7F` and again inverted into `$80-$FF`, so bit 7 of a screen byte selects inverse video with no attribute handling anywhere — which is exactly what ANTIC does with an inverse character. Because this does no CIO and therefore no SIO, it needs none of the R: close/reopen bracketing that every disk font load requires.
+
+  The font is deliberately built in **internal (screen code) order rather than ATASCII order**, and the ATASCII code is permuted into it by `to_glyph` on the way to the screen. Internal `$00` is space, so every "blank this cell" site in the terminal — `blank_rows`, `ED_adr`, `EL_adr` and the two blitter fill bytes — keeps writing char `$00` and keeps producing a blank cell, unchanged. An ATASCII-ordered font would have made glyph `$00` a heart and required patching all seven sites plus runtime-patching two blitter control blocks; `scroll_rgn.inc` and its unit test would have needed a blank-character parameter threaded through them.
+
+- **`row_insert_char` / `row_delete_char`** in `scroll_rgn.inc` — within-row cell moves backing ATASCII `$FF`/`$FE`. They bound themselves by `term_last_col`, so in 40-column mode they leave columns 40-79 untouched. Hardware-free, so they are unit-tested; they also make ANSI ICH/DCH nearly free later.
+
+- **ATASCII keyboard encoding.** RETURN sends `$9B`, BACKSPACE `$7E`, TAB `$7F`, and the arrow keys send single `$1C-$1F` codes instead of three-byte `ESC [ x` sequences. The Atari inverse-video key — keycodes 39/103/167/231, all previously dead entries in `keycode_table` — becomes a sticky bit-7 latch. The latch is applied only to codes that have an inverse counterpart: `$1B-$1F` are excluded so that inverse+ESC cannot silently become EOL, and RETURN still sends a bare EOL with inverse switched on, as on hardware.
+
+- **A 40/80-column auto-wrap setting** (`term_last_col`). ATASCII art is drawn for a 40-column screen, so selecting ATASCII sets the wrap column to 40; the Width row switches it back to 80 for hosts that assume it. Only auto-wrap is affected — absolute ANSI positioning and every erase/scroll blanking operation stay physical-80, since a stale glyph left in column 45 after a clear would be worse than an unreachable column.
+
+- **`atascii.inc`** and `test/sim65/atascii_test.s` — the encoding primitives are hardware-free, so the same source the XEX builds runs under `sim65`. 42 checks: `to_glyph` as the identity across all 256 codes in ANSI mode, each of the four ATASCII code bands at its boundaries, bit-7 pass-through, X preservation (`put_byte` keeps 0 there for its `(zp,X)` store), the keyboard remapping with and without the inverse latch, and `row_insert_char`/`row_delete_char` at column 0, mid-row, at the margin, and against a 40-column margin with columns 40-79 verified untouched.
+
+### Changed
+- **The OPTION menu is now a settings menu rather than a font picker.** It gains a `Mode:` row (ANSI / ATASCII) and a `Width:` row (80 / 40) above a divider, with the font list below. Selecting any CP437 font also selects ANSI, so mode and font can never disagree and one Mode row is sufficient for mutual exclusion; switching to ATASCII and back reloads whichever font row is marked active. The loaded font is marked with a `*`.
+
+  The menu engine grew three things to support this: rows whose `action_ptr` is `$0000` are non-selectable (the highlight steps over them, RETURN ignores them), value rows rewrite their own label and redraw without dismissing, and the box-drawing glyphs and all label text now go through the active font's glyph set — otherwise selecting ATASCII would have redrawn the menu in garbage, since `menu_draw_box` writes raw CP437 glyph indices and `menu_put_str_at` writes raw ASCII.
+
+- The 13 identical `font_load_*` procs collapsed into one `font_load_selected` driven by the row's own position in `main_menu`, plus a `font_path_table`. Adding a font was four coordinated edits; it is now a label, a path, and a menu line.
+
+- The program's own screen output (banner, prompts, connection wizard) now goes through `process_char_ansi`, which always uses the ANSI control interpretation regardless of mode. Only the *parser* fork is bypassed — glyph translation still applies, so the text draws correctly in whichever font is loaded. Without this the banner's colour sequences would have printed as literal `[31m` runs in ATASCII mode, since `$1B` there quotes the following byte.
+
+### Fixed
+- The `version` data field still read `v0.21.2026.07.07`; it was missed in the 0.22 bump.
+
 ## [0.22] - 2026-08-02
 
 ### Fixed

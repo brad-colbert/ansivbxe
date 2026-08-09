@@ -29,15 +29,17 @@ SIM65     ?= sim65
 BUILD_DIR   = build
 SCROLL_TEST_SRC = test/sim65/scroll_test.s
 SCROLL_TEST_BIN = $(BUILD_DIR)/scroll_test.bin
+ATASCII_TEST_SRC = test/sim65/atascii_test.s
+ATASCII_TEST_BIN = $(BUILD_DIR)/atascii_test.bin
 
 .PHONY: all disk ca65 ca65-disk mads mads-disk vbxe-lib clean test
 
 all: mads ca65
 
-# Host-side unit test for the scrolling-region primitives. scroll_rgn.inc touches no
-# Atari or VBXE hardware, so the same source the XEX uses runs under cc65's 6502
-# simulator. Exit code is 0, or the id of the first check that failed.
-test: $(SCROLL_TEST_BIN)
+# Host-side unit tests. scroll_rgn.inc and atascii.inc touch no Atari or VBXE
+# hardware, so the same source the XEX uses runs under cc65's 6502 simulator.
+# Each binary exits 0, or with the id of the first check that failed.
+test: $(SCROLL_TEST_BIN) $(ATASCII_TEST_BIN)
 	@$(SIM65) $(SCROLL_TEST_BIN); \
 	code=$$?; \
 	if [ $$code -eq 0 ]; then \
@@ -46,10 +48,22 @@ test: $(SCROLL_TEST_BIN)
 		echo "scroll_rgn: FAILED at check $$code (see $(SCROLL_TEST_SRC))"; \
 		exit 1; \
 	fi
+	@$(SIM65) $(ATASCII_TEST_BIN); \
+	code=$$?; \
+	if [ $$code -eq 0 ]; then \
+		echo "atascii:    all checks passed"; \
+	else \
+		echo "atascii:    FAILED at check $$code (see $(ATASCII_TEST_SRC))"; \
+		exit 1; \
+	fi
 
 $(SCROLL_TEST_BIN): $(SCROLL_TEST_SRC) scroll_rgn.inc
 	@mkdir -p $(BUILD_DIR)
 	$(CL65) -t sim6502 --asm-include-dir . -o $@ $(SCROLL_TEST_SRC)
+
+$(ATASCII_TEST_BIN): $(ATASCII_TEST_SRC) atascii.inc scroll_rgn.inc
+	@mkdir -p $(BUILD_DIR)
+	$(CL65) -t sim6502 --asm-include-dir . -o $@ $(ATASCII_TEST_SRC)
 
 vbxe-lib: $(VBXE_LIB)
 
