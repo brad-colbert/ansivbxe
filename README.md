@@ -1,10 +1,10 @@
 # VBXETERM
 
-An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences and a 256-character IBM PC font, using the VBXE (Video Board XE) graphics expansion. Renders ANSI art and connects to BBS systems and SSH hosts over serial (R:) or FujiNet (N:).
+An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences and a 256-character IBM PC font, using the VBXE (Video Board XE) graphics expansion. Renders ANSI art and connects to BBS systems and SSH hosts over serial (R:) or FujiNet (N:). Also speaks ATASCII, for Atari boards.
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.22  
+**Version:** v0.23  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -14,6 +14,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 - 80×24 text display via VBXE overlay text mode
 - 256-character IBM CGA-style font
+- **ANSI and ATASCII terminal modes**, switchable at any time from the OPTION menu
 - Editable ANSI color palette (16 colors: 8 standard + 8 high-intensity)
 - LF-as-CRLF mode enabled by default (compatible with most remote hosts)
 - OS SIO bus sound silenced during FujiNet N: sessions (no per-byte whine), restored on disconnect and exit
@@ -36,6 +37,48 @@ Selecting `N` at the device prompt steps through:
 5. **PASSWORD** — password (SSH only, displayed as `*`)
 
 The FujiNet URL is constructed automatically. Backspace works at every field.
+
+### ATASCII Mode
+
+Press **OPTION** and set `Mode:` to `ATASCII` to talk to an Atari BBS. ATASCII is a
+terminal mode rather than a font choice: it brings its own control set, its own
+character encoding and its own keyboard encoding, and the ANSI parser is bypassed
+entirely while it is active — it has to be, because `$1B` in ATASCII quotes the
+following byte instead of introducing an escape sequence, and `$9B` is EOL rather
+than CSI.
+
+The character set is built at runtime from the Atari OS charset ROM at `$E000`, so
+nothing extra ships on the disk. Glyphs `$00-$7F` are the ROM charset and `$80-$FF`
+are the same bitmaps inverted, which is how bit 7 gives you inverse video for free.
+
+Selecting ATASCII also sets the auto-wrap column to 40, since ATASCII art is drawn
+for a 40-column screen; the `Width:` row switches it back to 80. The display stays
+physically 80 columns wide either way — only the wrap point moves, so 40-column art
+occupies the left half of the screen.
+
+Selecting any of the CP437 fonts switches back to ANSI, so the two can never
+disagree.
+
+| Code | Name | Description |
+|------|------|-------------|
+| `$1B` | ESC | Print the next byte literally, whatever it is |
+| `$1C`–`$1F` | Cursor | Up / down / left / right — **wraps** at the screen edges (ANSI's CUU/CUD clamp instead) |
+| `$7D` | Clear | Clear screen and home the cursor |
+| `$7E` | Backspace | Move left and erase |
+| `$7F` | Tab | Advance to the next 8-column stop |
+| `$9B` | EOL | End of line (CR + LF) |
+| `$9C` / `$9D` | Delete / Insert line | Within the current scrolling region |
+| `$9E` / `$9F` | Clear / set tab stop | No-ops — tab stops are fixed at 8 columns, as with ANSI HTS/VTS |
+| `$FD` | Buzzer | Bell |
+| `$FE` / `$FF` | Delete / Insert character | Within the current row, bounded by the wrap column |
+
+Everything else prints, including the whole `$80-$FF` inverse range.
+
+In ATASCII mode the keyboard sends ATASCII too: RETURN sends `$9B`, BACKSPACE
+`$7E`, TAB `$7F`, and the arrow keys send single `$1C`–`$1F` codes rather than
+`ESC [ x`. The Atari **inverse-video key** becomes a sticky bit-7 latch, as on
+hardware — though it is deliberately not applied to `$1B`–`$1F`, so inverse+ESC
+cannot silently turn into EOL, and RETURN still sends a bare EOL with inverse on.
 
 ### Keyboard
 
@@ -158,8 +201,10 @@ and any sequence with a private-parameter prefix `?` `>` `=` `<` (e.g. `ESC[?25l
 | File | Description |
 |------|-------------|
 | `ANSIVBXE_ca65.asm` | Main source (ca65 assembler) |
-| `scroll_rgn.inc` | CPU row-move primitives for the scrolling region (shared with the unit test) |
+| `scroll_rgn.inc` | CPU row/cell-move primitives for the scrolling region (shared with the unit test) |
+| `atascii.inc` | ATASCII character and keyboard encoding (shared with the unit test) |
 | `test/sim65/scroll_test.s` | Host-side unit test for `scroll_rgn.inc` (`make test`) |
+| `test/sim65/atascii_test.s` | Host-side unit test for `atascii.inc` and the row cell moves (`make test`) |
 | `test/smoke.sh`, `test/scroll.sh` | Visual tests, run on the remote host over a live session |
 | `atarios_ca65.inc` | Atari OS equates |
 | `atarihardware_ca65.inc` | Atari hardware equates |
@@ -226,6 +271,12 @@ The code is ORG'd at `$2800`.
 
 The IBM PC CGA font was recreated as two 128-character halves (`first.fnt`, `second.fnt`) and concatenated into `IBMPC.FNT`. Characters are 8×8 pixels, matching VBXE's native text mode cell size. The CGA font was chosen because most ANSI BBS systems rely on IBM extended graphics characters.
 
+All the fonts in `disk/` are CP437-ordered, so in ANSI mode the received byte value *is* the glyph index and no translation is needed.
+
+ATASCII mode is the exception: its character set is built at runtime from the Atari OS charset ROM at `$E000` rather than loaded from disk. The ROM is 1 KB / 128 glyphs and is copied into VBXE font RAM twice — verbatim into glyphs `$00-$7F` and inverted into `$80-$FF`. That gives inverse video for free, since inverting the bitmap is exactly what ANTIC does for a character with bit 7 set.
+
+The ROM charset is stored in *internal* (screen code) order, and that order is kept rather than permuting the font into ATASCII order, because internal `$00` is space. Every "blank this cell" site in the terminal writes character `$00`, so all of them keep working unchanged in both modes. The ATASCII code is instead permuted on the way to the screen by `to_glyph` in `atascii.inc`.
+
 ---
 
 ## Palette
@@ -241,6 +292,15 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.23 — 2026-08-09
+- **Added ATASCII terminal mode**, selectable from the OPTION menu. ATASCII is handled as a mode rather than a font: it has its own control set (`$9B` EOL, `$1C-$1F` cursor, `$7D` clear, `$9C`/`$9D` line insert/delete, `$FE`/`$FF` character insert/delete), its own character encoding, and its own keyboard encoding. The ANSI parser is bypassed entirely while it is active, since `$1B` quotes the next byte there and `$9B` is EOL rather than CSI.
+- The ATASCII character set is built from the OS charset ROM at `$E000` at runtime, so nothing extra ships on the disk — and because it does no disk I/O, it needs none of the R: close/reopen bracketing a disk font load requires. It is kept in internal (screen code) order so that internal `$00` remains space and every existing cell-blanking site keeps working untouched.
+- Selecting ATASCII sets the auto-wrap column to 40 to match how ATASCII art is drawn; a new `Width:` row switches it back to 80. Only auto-wrap moves — absolute positioning and all erase/scroll blanking stay physical-80.
+- **The OPTION menu is now a settings menu, not just a font picker.** `Mode:` and `Width:` rows sit above a divider, with the font list below and a `*` marking the loaded font. The menu engine gained non-selectable rows, value rows that redraw without dismissing, and font-aware box and label glyphs — without the last of those, switching to ATASCII would have redrawn the menu itself in garbage.
+- The 13 identical `font_load_*` procs collapsed into one table-driven action; adding a font is now a label, a path and a menu line instead of four coordinated edits.
+- Added `test/sim65/atascii_test.s` — 42 checks over the encoding and row-editing primitives, run by `make test` alongside the scrolling tests.
+- Fixed the `version` data field, which still read `v0.21` after the 0.22 release.
 
 ### v0.22 — 2026-08-02
 - **Fixed the red screen after RESET.** The ANSI palette was being loaded into VBXE palette **0**, which is the palette VBXE renders the ordinary ANTIC/GTIA picture through. RESET stops XDL processing and hands the display back to ANTIC, but nothing restores palette 0, so DOS came back red on red — GR.0's `COLPF2 = $94` landed on entry 148 (ANSI colour 1) and the hi-res foreground `$9A` on entry 154 (also colour 1). The overlay now uses palette 1, which is VBXE's own default for it, and palette 0 is never touched.

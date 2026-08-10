@@ -28,6 +28,12 @@ scroll_bot	= $B1
 scr_src		= $B2
 scr_dst		= $B4
 
+; Required by row_insert_char/row_delete_char, which this test does not exercise
+; — they are covered by atascii_test.s. Declared only so the include assembles.
+row		= $83
+column		= $84
+term_last_col	= $B7
+
 ; --- test-local zero page ---
 
 exp_ptr		= $BA				; 2 bytes — expected-char table for the current check
@@ -42,6 +48,8 @@ sr_top:		.res	1
 sr_bot:		.res	1
 sr_n:		.res	1
 sr_rows:	.res	1
+rc_last:	.res	1
+rc_floor:	.res	1
 
 		.segment "CODE"
 

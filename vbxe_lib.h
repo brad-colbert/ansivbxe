@@ -67,6 +67,32 @@ int __fastcall__ vbxe_init(void);
 int __fastcall__ vbxe_load_files(vbxe_load_cfg_t *cfg);
 
 /*
+ * vbxe_load_font — load a 2 KB, 256-glyph font file into VBXE font RAM at
+ * VBXE $0000, replacing the font loaded by vbxe_load_files().
+ *
+ * Uses IOCB 3, not IOCB 1, so it is safe to call while an R: device holds
+ * IOCB 1 in concurrent mode.  Note that the disk SIO it performs still
+ * clobbers POKEY's serial configuration: an R: caller must close and
+ * reopen its device around this call.
+ *
+ * Returns 1 on success, 0 on any CIO I/O error.
+ */
+int __fastcall__ vbxe_load_font(const char *path);
+
+/*
+ * vbxe_font_from_rom — build the ATASCII character set into VBXE font RAM
+ * from the Atari OS charset ROM at $E000.
+ *
+ * Glyphs $00-$7F are the ROM charset verbatim (internal/screen-code order);
+ * glyphs $80-$FF are the same bitmaps inverted, so bit 7 of a screen byte
+ * selects inverse video with no attribute handling.
+ *
+ * Performs no I/O of any kind, so unlike vbxe_load_font() it is safe to
+ * call mid-session with an R: device open.  Cannot fail; returns 1.
+ */
+int __fastcall__ vbxe_font_from_rom(void);
+
+/*
  * vbxe_shutdown — disable the VBXE overlay, close the MEMAC window, and
  * restore SDMCTL to the value saved by vbxe_init().
  *
