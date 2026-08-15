@@ -3840,7 +3840,19 @@ save_under_buf	.res	960		; menu_w × menu_h × 2 bytes; main_menu needs 20×18×
 ; AUDF3/AUDF4, SKCTL) and clears POKMSK serial-IRQ bits 4-5 on every disk
 ; transaction, leaving R: handler with the wrong baud divisors and disabled
 ; serial IRQs.  Re-running these XIO commands re-applies the R: handler's
-; POKEY init via XIO 40, restoring R: to working order without close+reopen.
+; POKEY init via XIO 40, restoring R: to working order.
+;
+; This only works because every caller reaches us by falling through
+; open_r_device, i.e. immediately after an OPEN, with concurrent mode not yet
+; running.  XIO 40 is not idempotent: the handler's start-concurrent routine
+; begins `LDA $23F7 / BEQ ... / LDY #$99 / RTS`, so issued while concurrent mode
+; is already active it returns error $99 and re-applies nothing.  Do not call
+; this expecting to revive a live R: session in place — close and reopen.
+;
+; AUX1 = 0 on the XIO 40 below is what selects the handler's own 32-byte input
+; buffer at $23FA: the buffer choice is gated on AUX1 ($21A2: LDA ICAX1Z / BNE),
+; not on ICBL.  ICBL is only read when AUX1 is non-zero, so leaving it holding
+; a stale length from a previous GET/PUT_CHARS is harmless here.
 
 ; 9600 baud, 8 data bits, no status line checking
 		ldx	#$10
