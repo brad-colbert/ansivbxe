@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.23
+;	Version: v0.24
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -767,7 +767,7 @@ wait_for_byte	jsr	check_sendbuf
 ; keys go to the send-buffer FIFO. Flip menu_active=1 around menu_open so its
 ; modal loop sees menu_key_ready being set, then back to 0 so subsequent
 ; typing resumes routing to the FIFO. R: font swap is handled by the pre-CLOSE
-; / post-OPEN dance in font_swap_prep_r and font_swap_done.
+; / post-OPEN dance in font_swap_prep_r and font_swap_restore_r.
 		lda	#$01
 		sta	menu_active
 		lda	#$00
@@ -2471,6 +2471,14 @@ cursor_toggle					; inverts the color of the current character to show the curso
 		
 new_key		txa
 		pha				; we are going to need X
+		tya
+		pha				; ...and Y. The IRQ caller does not save it for us, and the
+					; ATASCII paths below load it (ldy atascii_mode). Returning with
+					; Y clobbered desyncs CIO's IOCB->ZP copy loop at $E4F3, which
+					; indexes source by X and destination by Y: the resumed loop
+					; then copies a mis-aligned slice into CIO's ZP work area and
+					; CIO writes that garbage back over IOCB 1. Fatal on R:, which
+					; sits in that loop almost continuously polling STATUS.
 		lda	#$03			; we put this back in keydel so we can check for bounce again
 		sta	KEYDEL
 		lda	KBCODE			; if it's not, then we need the keycode again
@@ -2574,6 +2582,8 @@ ansi_seq	sta	temp_key_char		; save N (adc can't add A to itself)
 
 no_value	lda	#$00			; key down, so reset ATRACT counter
 		sta	ATRACT			; not that it matters so much with VBXE, but it'll prevent changing border colors
+		pla
+		tay				; get y back (pushed last, so pulled first)
 		pla
 		tax				; get x back
 
@@ -3490,13 +3500,16 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 
 ; --- menu actions (leaf — set menu_dismiss to close on completion) ---
 ;
-; Each font_load_* proc loads a font from disk via _vbxe_load_font (IOCB 3),
-; then jumps to font_swap_done. The disk SIO inside _vbxe_load_font triggers
-; the OS SIOInitHardware path, which clobbers POKEY's serial-port config
+; font_load_index loads a font from disk via _vbxe_load_font (IOCB 3), bracketed
+; by font_swap_prep_r / font_swap_restore_r. The disk SIO inside _vbxe_load_font
+; triggers the OS SIOInitHardware path, which clobbers POKEY's serial-port config
 ; (AUDCTL, AUDF3/AUDF4 baud divisors, SKCTL) and clears POKMSK serial-IRQ
 ; bits 4-5 — fine for N: (request/response SIO), fatal for R: which holds
-; POKEY in concurrent-I/O mode. font_swap_done re-issues the R: configure
+; POKEY in concurrent-I/O mode. font_swap_restore_r re-issues the R: configure
 ; XIO sequence to revive POKEY when device_type == 0.
+;
+; That bracketing belongs to font_load_index alone. Callers must not add a
+; restore of their own — one CLOSE must pair with exactly one OPEN.
 
 .proc font_swap_prep_r
 ; Phase 7: pre-disk-SIO CLOSE on IOCB 1 when connected via R:. Lets the R:
@@ -3527,15 +3540,6 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		bne	@done
 		jsr	open_r_device
 @done		rts
-.endproc
-
-.proc font_swap_done
-; Recovery plus "close the menu" — for leaf actions that finish the interaction.
-; Actions that stay open (the Mode row) call font_swap_restore_r directly.
-		jsr	font_swap_restore_r
-		lda	#$01
-		sta	menu_dismiss
-		rts
 .endproc
 
 .proc font_load_index
@@ -3572,7 +3576,17 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		lda	#79
 		sta	term_last_col
 		jsr	menu_init_labels	; the Mode row may have just changed
-		jmp	font_swap_done
+
+; Dismiss directly rather than via a restore helper: font_load_index has already
+; re-opened R: on the way out. Going through a second font_swap_restore_r here
+; issued a second OPEN on an IOCB 1 that was still open, and the XL OS OPEN path
+; at $E597 skips the HATABS device lookup when ICHID != $FF — so instead of
+; erroring it re-entered the 850 handler's OPEN on a live port (zeroing its
+; per-port state) and re-ran the whole XIO 36/38/34/40 sequence, including
+; XIO 40 on a port already in concurrent mode.
+		lda	#$01
+		sta	menu_dismiss
+		rts
 .endproc
 
 .proc act_cycle_mode
@@ -3826,7 +3840,19 @@ save_under_buf	.res	960		; menu_w × menu_h × 2 bytes; main_menu needs 20×18×
 ; AUDF3/AUDF4, SKCTL) and clears POKMSK serial-IRQ bits 4-5 on every disk
 ; transaction, leaving R: handler with the wrong baud divisors and disabled
 ; serial IRQs.  Re-running these XIO commands re-applies the R: handler's
-; POKEY init via XIO 40, restoring R: to working order without close+reopen.
+; POKEY init via XIO 40, restoring R: to working order.
+;
+; This only works because every caller reaches us by falling through
+; open_r_device, i.e. immediately after an OPEN, with concurrent mode not yet
+; running.  XIO 40 is not idempotent: the handler's start-concurrent routine
+; begins `LDA $23F7 / BEQ ... / LDY #$99 / RTS`, so issued while concurrent mode
+; is already active it returns error $99 and re-applies nothing.  Do not call
+; this expecting to revive a live R: session in place — close and reopen.
+;
+; AUX1 = 0 on the XIO 40 below is what selects the handler's own 32-byte input
+; buffer at $23FA: the buffer choice is gated on AUX1 ($21A2: LDA ICAX1Z / BNE),
+; not on ICBL.  ICBL is only read when AUX1 is non-zero, so leaving it holding
+; a stale length from a previous GET/PUT_CHARS is harmless here.
 
 ; 9600 baud, 8 data bits, no status line checking
 		ldx	#$10
@@ -4199,7 +4225,7 @@ exit_to_dos
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
 dev_ready	.res	1, $00				; 1 = a device (R:/N:) is open; gates R: font-swap serial I/O
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.23 (2026-08-09)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.24 (2026-08-14)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -4762,6 +4788,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.23.2026.08.09"
+version		.byte	"v0.24.2026.08.14"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)

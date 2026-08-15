@@ -7,6 +7,20 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.24] - 2026-08-14
+
+### Fixed
+- **R: sessions hung or crashed outright, usually within a minute of typing.** `kbd_irq` preserved A and X but not Y. That was safe until 0.23: the only Y use was inside `ansi_seq`, bracketed by `tya`/`pha` … `pla`/`tay` and the comment "preserve Y (IRQ caller doesn't save it for us)". ATASCII support then added two unguarded `ldy atascii_mode` on the ordinary keypress path, so from 0.23 on almost every keystroke returned from the interrupt with Y clobbered. This affected ANSI mode as well — the `ldy` executes regardless of mode.
+
+  It is fatal specifically on R: because `recv_from_device` polls CIO STATUS on IOCB 1 every main-loop iteration, leaving the CPU almost permanently inside CIOV's IOCB-to-zero-page copy loop at `$E4F3` — a loop that indexes its source by X and its destination by Y. A keypress mid-loop resumed with X intact and Y reset, so the remaining iterations copied a mis-aligned 12-byte slice, spanning IOCB 1's tail and IOCB 2's head, into CIO's zero-page work area. `ICHIDZ` and `ICCOMZ` became garbage, CIO rejected the command with error `$84`, and its exit path at `$E670` wrote the garbage straight back over IOCB 1 (the target index in `ICAX5Z` was still correct). The next R: I/O then dispatched through a bogus `HATABS` index: CIO's `RTS`-style dispatch pushed a `$0000` vector and returned into zero page, which hung or hit `KIL` depending on where it landed. N: was unaffected, since it drives raw `SIOV` rather than the CIO copy loop.
+
+  Y is now pushed alongside X at `new_key` and pulled back in `no_value`. `bounce` is entered before the pushes and is unchanged.
+
+- **Selecting a font from the settings menu opened R: twice for one close.** 0.23 split the old `font_swap_done` into `font_swap_restore_r` plus "set `menu_dismiss`" and moved the reopen into `font_load_index`, but `font_load_selected` kept its trailing jump to `font_swap_done`, so the restore ran twice. The second OPEN did not error out: the XL OS OPEN path at `$E597` skips the `HATABS` device lookup when `ICHID != $FF`, so instead of returning "IOCB already open" it re-entered the 850 handler's OPEN on a live port — rezeroing its per-port state — and re-ran the whole XIO 36/38/34/40 sequence. `font_load_selected` now dismisses directly, and `font_swap_done`, which had no other caller, is gone. The close/reopen bracketing belongs to `font_load_index` alone.
+
+### Notes
+- A suspected third defect — `configure_r_device` leaving `ICBL` stale across XIO 40 — was investigated and found not to be one. The 850 handler gates its input-buffer choice on AUX1, not `ICBL` (`$21A2: LDA ICAX1Z / BNE`), and this code always passes AUX1 = 0, so the handler's own 32-byte buffer at `$23FA` is always selected and `ICBL` is never read. The comment on `configure_r_device` now records that, along with the fact that XIO 40 is not idempotent: issued while concurrent mode is already running it returns error `$99` and re-applies nothing, so the sequence only works because every caller reaches it by falling through `open_r_device`.
+
 ## [0.23] - 2026-08-09
 
 ### Added

@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.23  
+**Version:** v0.24  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -292,6 +292,10 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.24 — 2026-08-14
+- **Fixed the R: hangs and crashes introduced in v0.23.** `kbd_irq` saved A and X but not Y, and v0.23's ATASCII support added `ldy atascii_mode` onto the ordinary keypress path — so from v0.23 on, nearly every keystroke returned from the interrupt with Y clobbered. That is specifically fatal on R:, which polls CIO STATUS on IOCB 1 every main-loop iteration and so is almost always inside CIO's IOCB-to-zero-page copy loop, a loop indexed by X *and* Y. A keypress mid-copy left the loop mis-aligned, filling CIO's work area with a slice spanning two IOCBs; CIO then wrote that back over IOCB 1, and the next R: I/O dispatched through a bogus handler index straight into zero page. It affected ANSI mode too, not just ATASCII — the `ldy` runs whatever the mode is.
+- **Fixed a double OPEN of R: when selecting a font** from the settings menu. `font_load_selected` issued one CLOSE but two OPENs, because v0.23 moved the reopen into `font_load_index` without dropping the caller's own trailing restore. The second OPEN did not fail cleanly: the XL OS skips the device lookup when the IOCB is still open, so it re-entered the 850 handler's OPEN on a live port.
 
 ### v0.23 — 2026-08-09
 - **Added ATASCII terminal mode**, selectable from the OPTION menu. ATASCII is handled as a mode rather than a font: it has its own control set (`$9B` EOL, `$1C-$1F` cursor, `$7D` clear, `$9C`/`$9D` line insert/delete, `$FE`/`$FF` character insert/delete), its own character encoding, and its own keyboard encoding. The ANSI parser is bypassed entirely while it is active, since `$1B` quotes the next byte there and `$9B` is EOL rather than CSI.
