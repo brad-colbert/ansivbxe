@@ -2471,6 +2471,14 @@ cursor_toggle					; inverts the color of the current character to show the curso
 		
 new_key		txa
 		pha				; we are going to need X
+		tya
+		pha				; ...and Y. The IRQ caller does not save it for us, and the
+					; ATASCII paths below load it (ldy atascii_mode). Returning with
+					; Y clobbered desyncs CIO's IOCB->ZP copy loop at $E4F3, which
+					; indexes source by X and destination by Y: the resumed loop
+					; then copies a mis-aligned slice into CIO's ZP work area and
+					; CIO writes that garbage back over IOCB 1. Fatal on R:, which
+					; sits in that loop almost continuously polling STATUS.
 		lda	#$03			; we put this back in keydel so we can check for bounce again
 		sta	KEYDEL
 		lda	KBCODE			; if it's not, then we need the keycode again
@@ -2574,6 +2582,8 @@ ansi_seq	sta	temp_key_char		; save N (adc can't add A to itself)
 
 no_value	lda	#$00			; key down, so reset ATRACT counter
 		sta	ATRACT			; not that it matters so much with VBXE, but it'll prevent changing border colors
+		pla
+		tay				; get y back (pushed last, so pulled first)
 		pla
 		tax				; get x back
 
