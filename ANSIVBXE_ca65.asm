@@ -767,7 +767,7 @@ wait_for_byte	jsr	check_sendbuf
 ; keys go to the send-buffer FIFO. Flip menu_active=1 around menu_open so its
 ; modal loop sees menu_key_ready being set, then back to 0 so subsequent
 ; typing resumes routing to the FIFO. R: font swap is handled by the pre-CLOSE
-; / post-OPEN dance in font_swap_prep_r and font_swap_done.
+; / post-OPEN dance in font_swap_prep_r and font_swap_restore_r.
 		lda	#$01
 		sta	menu_active
 		lda	#$00
@@ -3500,13 +3500,16 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 
 ; --- menu actions (leaf — set menu_dismiss to close on completion) ---
 ;
-; Each font_load_* proc loads a font from disk via _vbxe_load_font (IOCB 3),
-; then jumps to font_swap_done. The disk SIO inside _vbxe_load_font triggers
-; the OS SIOInitHardware path, which clobbers POKEY's serial-port config
+; font_load_index loads a font from disk via _vbxe_load_font (IOCB 3), bracketed
+; by font_swap_prep_r / font_swap_restore_r. The disk SIO inside _vbxe_load_font
+; triggers the OS SIOInitHardware path, which clobbers POKEY's serial-port config
 ; (AUDCTL, AUDF3/AUDF4 baud divisors, SKCTL) and clears POKMSK serial-IRQ
 ; bits 4-5 — fine for N: (request/response SIO), fatal for R: which holds
-; POKEY in concurrent-I/O mode. font_swap_done re-issues the R: configure
+; POKEY in concurrent-I/O mode. font_swap_restore_r re-issues the R: configure
 ; XIO sequence to revive POKEY when device_type == 0.
+;
+; That bracketing belongs to font_load_index alone. Callers must not add a
+; restore of their own — one CLOSE must pair with exactly one OPEN.
 
 .proc font_swap_prep_r
 ; Phase 7: pre-disk-SIO CLOSE on IOCB 1 when connected via R:. Lets the R:
@@ -3537,15 +3540,6 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		bne	@done
 		jsr	open_r_device
 @done		rts
-.endproc
-
-.proc font_swap_done
-; Recovery plus "close the menu" — for leaf actions that finish the interaction.
-; Actions that stay open (the Mode row) call font_swap_restore_r directly.
-		jsr	font_swap_restore_r
-		lda	#$01
-		sta	menu_dismiss
-		rts
 .endproc
 
 .proc font_load_index
@@ -3582,7 +3576,17 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 		lda	#79
 		sta	term_last_col
 		jsr	menu_init_labels	; the Mode row may have just changed
-		jmp	font_swap_done
+
+; Dismiss directly rather than via a restore helper: font_load_index has already
+; re-opened R: on the way out. Going through a second font_swap_restore_r here
+; issued a second OPEN on an IOCB 1 that was still open, and the XL OS OPEN path
+; at $E597 skips the HATABS device lookup when ICHID != $FF — so instead of
+; erroring it re-entered the 850 handler's OPEN on a live port (zeroing its
+; per-port state) and re-ran the whole XIO 36/38/34/40 sequence, including
+; XIO 40 on a port already in concurrent mode.
+		lda	#$01
+		sta	menu_dismiss
+		rts
 .endproc
 
 .proc act_cycle_mode
