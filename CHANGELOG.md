@@ -7,6 +7,19 @@ Version numbers follow the format `x.zz.yyyy.mm.dd` where `x` is incremented for
 
 ---
 
+## [0.25] - 2026-08-15
+
+### Fixed
+- **The settings menu could not be navigated under emulation, which presented as a hang.** `menu_open`'s dispatch accepted exactly four keycodes: `$8E` (Ctrl+`-`, cursor up), `$8F` (Ctrl+`=`, cursor down), `$0C` RETURN and `$1C` ESC. Under Altirra neither cursor combination arrives. Ctrl+Minus is claimed by the emulator as its own display-zoom hotkey and never reaches the machine at all, and Ctrl+Equals is delivered as `$86` — Ctrl+`+`, which is cursor *left* — so it falls through the `cpx` chain and is ignored. The PC arrow keys generate no keyboard interrupt whatsoever. With the highlight immovable the only reachable actions are the Mode toggle on row 0 and ESC, so pressing OPTION during an R: session and then trying to move looks exactly like a locked-up terminal.
+
+  Nothing was actually hung. Caught live in the debugger the CPU was spinning in `menu_open`'s `@loop` on `LDA menu_key_ready / BEQ`, with `IRQEN = $F0` (keyboard interrupt enabled), `SKCTL = $73` (keyboard scan enabled), the I flag clear and `VKEYBD` pointing at `kbd_irq`. A breakpoint on `kbd_irq` fired on the next keypress and single-stepping showed it storing `menu_key`/`menu_key_ready` correctly. The give-away was that `KBCODE` and `CH1` both still held `$0C` from the last RETURN typed at the terminal, while `menu_key` still held `$28` — the `R` pressed at device select — proving that no keypress had been handled in any menu for the whole session.
+
+  Unmodified `-` (`$0E`) and `=` (`$0F`) are now accepted as aliases for up and down. Both are delivered intact, neither collides with an emulator hotkey, and nothing else in the menu wants them. The Ctrl'd forms are unchanged and still work on real hardware.
+
+### Notes
+- The R: font-swap path was re-verified end to end while chasing this and is sound. On a fresh boot over R:: navigate to a font row, RETURN, disk load through IOCB 3, CLOSE and reopen of IOCB 1 with the full XIO 36/38/34/40 sequence, menu dismiss — and the concurrent-mode session survives, confirmed by the modem still answering `AT?` afterwards in the newly loaded font. Opening the menu mid-burst so the 850's 32-byte input buffer overflows costs inbound data but does not wedge the handler or the keyboard.
+- The font load takes several seconds over NetSIO, and the menu stays on screen for its duration with no progress indication, which is easy to mistake for a stall.
+
 ## [0.24] - 2026-08-14
 
 ### Fixed

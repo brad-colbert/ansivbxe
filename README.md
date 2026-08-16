@@ -4,7 +4,7 @@ An Atari 8-bit terminal emulator that supports ANSI/ECMA-48 control sequences an
 
 **Converted to CA65 and updated by:** Brad Colbert  
 **Original MADS by:** Joseph Zatarski  
-**Version:** v0.24  
+**Version:** v0.25  
 
 <img width="608" height="172" alt="image" src="https://github.com/user-attachments/assets/84c7b30e-c9b0-4522-83ff-6d2b81787d69" />
 
@@ -292,6 +292,9 @@ The palette is file-based (not hardcoded) to allow customization — notably to 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### v0.25 — 2026-08-15
+- **Fixed the settings menu being impossible to navigate under emulation.** The menu only accepted the Atari cursor keys, Ctrl+`-` and Ctrl+`=`. Under Altirra neither reaches the machine — Ctrl+Minus is the emulator's own display-zoom hotkey, and Ctrl+Equals arrives as cursor *left* — and the PC arrow keys produce no keyboard interrupt at all. The highlight could not be moved, so opening OPTION over an R: session looked like a hang, though nothing was actually hung. Plain `-` and `=` now work as up and down alongside the Ctrl'd forms.
 
 ### v0.24 — 2026-08-14
 - **Fixed the R: hangs and crashes introduced in v0.23.** `kbd_irq` saved A and X but not Y, and v0.23's ATASCII support added `ldy atascii_mode` onto the ordinary keypress path — so from v0.23 on, nearly every keystroke returned from the interrupt with Y clobbered. That is specifically fatal on R:, which polls CIO STATUS on IOCB 1 every main-loop iteration and so is almost always inside CIO's IOCB-to-zero-page copy loop, a loop indexed by X *and* Y. A keypress mid-copy left the loop mis-aligned, filling CIO's work area with a slice spanning two IOCBs; CIO then wrote that back over IOCB 1, and the next R: I/O dispatched through a bogus handler index straight into zero page. It affected ANSI mode too, not just ATASCII — the `ldy` runs whatever the mode is.

@@ -19,7 +19,7 @@
 ;
 ;	Converted by:     Brad Colbert
 ;	Original MADS by: Joseph Zatarski
-;	Version: v0.24
+;	Version: v0.25
 ;
 ;	terminal emulator that supports ANSI/ECMA-48 control sequences and a 256 character font
 ;######################################################################################################################################
@@ -2900,6 +2900,16 @@ KBCODE_ESC	= 28
 KBCODE_UP	= 142
 KBCODE_DOWN	= 143
 
+; Unmodified '-' and '=' double as up/down. The Atari cursor keys are Ctrl+'-'
+; and Ctrl+'=', and under emulation neither combination reliably reaches the
+; machine: Altirra claims Ctrl+Minus for its own display zoom, and Ctrl+Equals
+; comes through as $86 — Ctrl+'+', which is cursor *left*. With only $8E/$8F
+; accepted the highlight cannot be moved at all, which reads as a hung menu.
+; The bare keys arrive intact, so accept them too; nothing else in the menu
+; wants '-' or '='.
+KBCODE_UP_ALT	= 14				; '-' without Ctrl
+KBCODE_DOWN_ALT	= 15				; '=' without Ctrl
+
 ; menu cell color attributes
 MENU_COLOR_NORM	= $87				; white-on-black, overlay enabled (matches default text)
 MENU_COLOR_HILT	= $F0				; black-on-white (MENU_COLOR_NORM EOR $77)
@@ -3006,7 +3016,11 @@ ps_str		= $AE				; 2 bytes — string source pointer for menu_put_str_at (must b
 
 		cpx	#KBCODE_UP
 		beq	@key_up
+		cpx	#KBCODE_UP_ALT
+		beq	@key_up
 		cpx	#KBCODE_DOWN
+		beq	@key_down
+		cpx	#KBCODE_DOWN_ALT
 		beq	@key_down
 		cpx	#KBCODE_RETURN
 		beq	@key_select
@@ -4225,7 +4239,7 @@ exit_to_dos
 send_stage_buf	.res	MAX_SEND_BATCH, $00		; coalesced outbound staging buffer
 send_count	.res	1, $00				; bytes staged for the current send
 dev_ready	.res	1, $00				; 1 = a device (R:/N:) is open; gates R: font-swap serial I/O
-banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.24 (2026-08-14)", $9B
+banner_msg	.byte	$1B,"[31m","V",$1B,"[32m","B",$1B,"[34m","X",$1B,"[33m","E",$1B,"[0m","TERM v0.25 (2026-08-15)", $9B
 select_prompt	.byte	"R=Serial  N=FujiNet? ", $9B
 no_n_msg	.byte	"FujiNet open failed: $", $9B
 press_return_msg	.byte	" - Press Return.", $9B
@@ -4788,6 +4802,6 @@ keycode_table	.byte	$6C			;0 - l - l
 		.byte	$1			;255 - SOH - ctrl+A
 
 ; Version number field
-version		.byte	"v0.24.2026.08.14"
+version		.byte	"v0.25.2026.08.15"
 
 end						;should be plenty of space after this that is free (like for MEMAC window)
